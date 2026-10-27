@@ -1,6 +1,8 @@
 # 上空波 Rx-TDOA の時間帯別評価（CHUCK 本家 UeEmon/VOCAP-COMPATIBILITY- の VOACAP で周波数計画）
 # altpnt-skywave --config config/skywave_japan.yaml --out out/skywave
 
+chuck_url: https://168-110-7-225.sslip.io   # CHUCK 公開版（Oracle Cloud）。実効 SSN の取得先（--ssn-from で上書き）
+
 stations:                       # 送信所（既知位置）
   青森: [40.82, 140.74]
   千葉: [35.61, 140.12]
@@ -30,7 +32,7 @@ points:                         # [方位deg, 距離NM] または [緯度, 経�
 epochs:                         # 季節ごとに評価（SSN は平滑黒点数の想定値）
                                 # 当月は {ssn: effective, ssn_fallback: 100} とすると、CHUCK の実効 SSN
                                 # （GIRO の foF2 観測に VOACAP を合わせた値）を --ssn-from の CHUCK から取得する
-  - {year: 2026, month: 10, ssn: 100}
+  - {year: 2026, month: 10, ssn: effective, ssn_fallback: 100}
   - {year: 2027, month: 1, ssn: 90}
   - {year: 2027, month: 4, ssn: 85}
   - {year: 2027, month: 7, ssn: 75}

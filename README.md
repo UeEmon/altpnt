@@ -91,9 +91,10 @@ VOACAP_MODEL=/usr/local/share/voacapl/itshfbc altpnt-skywave --out out/skywave
 # 稼働中の CHUCK の API を使う（公開版は 1 時間 60 回まで。結果はキャッシュして再計算しない）
 altpnt-skywave --chuck-url http://localhost:18082 --out out/skywave
 altpnt-skywave --with 南鳥島 与那国 --out out/skywave_ext     # 候補局を足して比較
-altpnt-skywave --ssn-from http://localhost:18082 --out out/skywave_now   # 当月を CHUCK の実効 SSN で（epochs に ssn: effective）
+altpnt-skywave --ssn-from http://localhost:18082 --out out/skywave_now   # 実効 SSN の取得先を変える（既定は config の chuck_url）
 ```
 
+当月（`ssn: effective`）は、`chuck_url` の CHUCK 公開版（https://168-110-7-225.sslip.io）から実効 SSN を取得します。取れなければ `ssn_fallback` を使い、どちらを使ったかを `summary.json` に記録します。
 設定は `config/skywave_japan.yaml`（送信所、評価点、季節と SSN、周波数の候補、回線条件、補正方式）。
 出力は `frequency_plan.csv`（周波数運用表）、`position_error.csv`、`summary.json`、補正方式ごとの時間帯別誤差の図。
 計算エンジンは本家と公開版で同一（同じ入力で結果が完全一致することを確認済み）。

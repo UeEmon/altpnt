@@ -167,7 +167,7 @@ def main(argv=None):
     ap.add_argument("--chuck-url", help="稼働中の CHUCK の URL（省略時は CHUCK_APP_DIR のエンジンを直接使う）")
     ap.add_argument("--chuck-user")
     ap.add_argument("--chuck-password")
-    ap.add_argument("--ssn-from", help="実効 SSN を取る CHUCK の URL（省略時は --chuck-url）")
+    ap.add_argument("--ssn-from", help="実効 SSN を取る CHUCK の URL（省略時は --chuck-url、次に config の chuck_url）")
     ap.add_argument("--with", dest="extra", nargs="*", default=[], help="extra_stations から追加する送信所")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -179,7 +179,7 @@ def main(argv=None):
         backend = ChuckHttpBackend(a.chuck_url, cache_dir=cache, auth=auth)
     else:
         backend = ChuckEngineBackend(cache_dir=cache)
-    res = run(cfg, backend, a.extra, ssn_url=a.ssn_from or a.chuck_url)
+    res = run(cfg, backend, a.extra, ssn_url=a.ssn_from or a.chuck_url or cfg.get("chuck_url"))
     for name, rows in (("frequency_plan.csv", res["plan"]), ("position_error.csv", res["errors"])):
         with open(od / name, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))
