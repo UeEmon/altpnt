@@ -1,0 +1,66 @@
+# 既定シナリオ: 沿岸から 150〜350 km 沖、GPS ロスト直後から PNT グリッドを展開して周回・帰投
+seed: 42
+dt: 1.0                       # 航空機 EKF 周期 [s]
+
+anchors_m:                    # 友軍 HF 送信局（既知位置, 局所 ENU [m]）
+  - [-350000, 0]
+  - [-300000, 300000]
+  - [-280000, -320000]
+  - [100000, 450000]
+
+aircraft:
+  start: [-150000, -100000, 0.3]   # x, y, heading[rad]
+  speed: 150.0                     # [m/s]
+  altitude: 1500.0                 # [m]（気圧高度で既知と仮定）
+  turn_radius: 4000.0              # [m]
+  init_pos_sigma: 50.0             # GPS ロスト時点の位置 σ [m]
+
+ins:
+  bias0_sigma: 0.35
+  bias_rw: 0.002
+  vel_noise: 0.05
+
+pnt_grid:
+  n_buoys: 7
+  center: [150000, 50000]
+  spacing: 15000.0
+  orbit_duration_s: 3600
+  buoy_ant_height: 0.8
+
+hf:
+  freq_hz: 8000000.0
+  bandwidth_hz: 5000
+  snr_ref_db: 30
+  update_s: 10
+  aircraft_outage_prob: 0.3        # 機上 HF 受信の欠測率（自機送信干渉・姿勢等）
+  buoy_diversity: true
+
+vhf:
+  freq_hz: 160000000.0
+  update_s: 2
+  ranging_sigma_m: 30.0            # VHF タイムスタンプ測距 σ
+  buoy_sync_sigma_m: 30.0          # ブイ間時刻同期誤差（距離換算）
+  hs_m: 2.0                        # 有義波高
+  max_dop: 6.0                     # ブイ網 TDOA の幾何 DOP 上限（超えたら観測を使わない）
+
+drift:
+  engine: aqua                    # aqua: aqua-drift-simulator の潮流場・投下モデル / builtin: 内蔵モデル
+  diffusivity: 5.0                # 未解像乱流の拡散 [m^2/s]（aqua 本体には無い追加項）
+  aqua:
+    origin_latlon: [30.0, 135.0]  # 局所 ENU 原点の緯度経度
+    leeway: 0.0                   # 風圧流係数（aqua 本体は潮流のみ → 既定 0）
+    current_field:                # aqua_drift.models.CurrentFieldConfig（v = base + G (p - p_ref), kt/NM）
+      reference_position: {latitude: 30.0, longitude: 135.0, depth_ft: 0.0}
+      base_velocity: {east_kt: 0.6, north_kt: 0.2, vertical_fps: 0.0}
+      gradient_per_nm:
+        - [0.0, 0.004, 0.0]
+        - [-0.004, 0.0, 0.0]
+        - [0.0, 0.0, 0.0]
+  drop:
+    enabled: true                 # aqua_drift.wind による自由落下・着水点
+    release_correction: true      # 直前の着水点から平均風を推定して放出を前倒し
+    splash_obs_sigma_m: 100.0     # 着水点観測の σ（ブイ初回 HF 測位相当）
+    wind: null                    # null = aqua_drift.models.WindConfig 既定（海面 10kt/250° → 30kft 70kt/290°）
+  # builtin 用
+  mean_current: [0.25, 0.10]
+  wind: [8.0, 3.0]

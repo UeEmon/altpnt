@@ -1,0 +1,49 @@
+# 代替PNTシミュレータ コンテナ構成
+#   edge    : ソノブイ／機内ノード（信号処理・INSバウンディングEKF）
+#   cloud   : 親局／統合解析基盤（ネットワーク統合推定・Dubins計画・LLM状況解析）
+#   litellm : LLM APIゲートウェイ（ローカルLLM ⇔ クラウドLLM 切替）
+#
+# edge と cloud は別ネットワークに分離し、litellm のみが両方に接続する。
+# VHFリンク帯域制約（120kbps）は edge の LINK_RATE_BPS で模擬する。
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./config/litellm_config.yaml:/app/config.yaml:ro
+    env_file: [.env]
+    ports: ["4000:4000"]
+    networks: [edge_net, cloud_net]
+
+  edge:
+    build: { context: ., dockerfile: services/edge/Dockerfile }
+    environment:
+      NODE_ROLE: edge
+      LINK_RATE_BPS: "120000"
+      LITELLM_BASE_URL: http://litellm:4000
+      LLM_MODEL: edge-fast
+    env_file: [.env]
+    volumes:
+      - ./data:/app/data
+      - ./out:/app/out
+    networks: [edge_net]
+    depends_on: [litellm]
+
+  cloud:
+    build: { context: ., dockerfile: services/cloud/Dockerfile }
+    environment:
+      NODE_ROLE: cloud
+      LITELLM_BASE_URL: http://litellm:4000
+      LLM_MODEL: cloud-analyst
+    env_file: [.env]
+    volumes:
+      - ./data:/app/data
+      - ./out:/app/out
+    ports: ["8080:8080"]
+    networks: [cloud_net]
+    depends_on: [litellm]
+
+networks:
+  edge_net: {}
+  cloud_net: {}
