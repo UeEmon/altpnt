@@ -80,21 +80,23 @@ config/litellm_config.yaml      論理モデル名 edge-fast / cloud-analyst →
 
 ## 上空波の時間帯別評価（CHUCK で周波数計画）
 
-既存の HF 伝搬予算プログラム CHUCK（[UeEmon/CHUCK-public-](https://github.com/UeEmon/CHUCK-public-)、VOACAP 互換）を呼び、
+既存の HF 伝搬予算プログラム CHUCK（本家 UeEmon/VOCAP-COMPATIBILITY-、VOACAP 互換。公開版は [UeEmon/CHUCK-public-](https://github.com/UeEmon/CHUCK-public-)）を呼び、
 送信所×評価点×時刻ごとに周波数を選びます（信頼度 `rel_min` 以上の候補から選択）。そのうえで、その時刻に使える送信所の組から位置誤差を出します。
 VOACAP の生出力から、伝搬モード・仮想反射高度・マルチパス確率も読み、上空波の距離誤差モデルに使います。
 
 ```bash
 # CHUCK のエンジンを直接使う（計算回数の上限なし。voacapl は CHUCK の Dockerfile と同じ手順でビルド）
-CHUCK_APP_DIR=../CHUCK-public-/app VOACAP_BIN=/usr/local/bin/voacapl \
+CHUCK_APP_DIR=../VOCAP-COMPATIBILITY-/app VOACAP_BIN=/usr/local/bin/voacapl \
 VOACAP_MODEL=/usr/local/share/voacapl/itshfbc altpnt-skywave --out out/skywave
 # 稼働中の CHUCK の API を使う（公開版は 1 時間 60 回まで。結果はキャッシュして再計算しない）
 altpnt-skywave --chuck-url http://localhost:18082 --out out/skywave
 altpnt-skywave --with 南鳥島 与那国 --out out/skywave_ext     # 候補局を足して比較
+altpnt-skywave --ssn-from http://localhost:18082 --out out/skywave_now   # 当月を CHUCK の実効 SSN で（epochs に ssn: effective）
 ```
 
 設定は `config/skywave_japan.yaml`（送信所、評価点、季節と SSN、周波数の候補、回線条件、補正方式）。
 出力は `frequency_plan.csv`（周波数運用表）、`position_error.csv`、`summary.json`、補正方式ごとの時間帯別誤差の図。
+計算エンジンは本家と公開版で同一（同じ入力で結果が完全一致することを確認済み）。
 補正方式: `model`（反射高度 σ20 km）/ `realtime`（σ5 km）/ `differential`（近くの参照点で差分補正、距離誤差 σ0.2 km は仮定）。
 VOACAP は地表波を計算しないため、`ground_wave_km` 以内は地表波として固定の誤差を置いています。
 

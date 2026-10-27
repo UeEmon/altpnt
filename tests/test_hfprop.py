@@ -81,3 +81,18 @@ def test_chuck_request_matches_api_fields():
     for k in ("tx_lat", "rx_lon", "year", "month", "ssn", "frequencies", "power_w", "tx_antenna", "tx_length_m",
               "bandwidth", "inband_snr_db"):
         assert k in req
+
+
+def test_resolve_ssn_effective_and_fallback():
+    from altpnt_sim.skywave import resolve_ssn
+
+    ok = lambda url, y, m: (87.4, {"used_count": 3})                      # noqa: E731
+    none = lambda url, y, m: (None, {"error": "観測が2局そろいません"})     # noqa: E731
+    assert resolve_ssn({"year": 2026, "month": 10, "ssn": 95}, None) == (95.0, "config")
+    v, src = resolve_ssn({"year": 2026, "month": 10, "ssn": "effective"}, "http://chuck", ok)
+    assert v == 87.4 and src.startswith("effective")
+    v, src = resolve_ssn({"year": 2026, "month": 10, "ssn": "effective", "ssn_fallback": 100}, "http://chuck", none)
+    assert v == 100.0 and "2局" in src
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_ssn({"year": 2026, "month": 10, "ssn": "effective"}, None)

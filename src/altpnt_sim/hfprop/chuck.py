@@ -1,10 +1,10 @@
-"""CHUCK（HF 伝搬予算プログラム）の呼び出し.
+"""CHUCK（HF 伝搬予算プログラム、本家 UeEmon/VOCAP-COMPATIBILITY-）の呼び出し.
 
 2 通りの呼び方を用意する。どちらも CHUCK の /api/predict と同じ入力（辞書）を受け、
 VOACAP の生出力を parse_voacap で全項目に分解して返す。
 
 - ChuckEngineBackend: CHUCK の app/engine.py を直接 import して VOACAP を回す（大量計算向け）。
-    CHUCK_APP_DIR      … CHUCK リポジトリの app ディレクトリ
+    CHUCK_APP_DIR      … CHUCK 本家（VOCAP-COMPATIBILITY-）の app ディレクトリ（公開版 CHUCK-public- でも同じ結果）
     VOACAP_BIN / VOACAP_MODEL … voacapl 本体と itshfbc データ（CHUCK の Dockerfile と同じもの）
 - ChuckHttpBackend: 稼働中の CHUCK に POST /api/predict する。
     公開版は 1 時間あたりの計算回数に上限があるので、結果をディスクにキャッシュし、同じ条件は再計算しない。
@@ -113,3 +113,14 @@ class ChuckHttpBackend(_Cached):
                     continue
                 raise RuntimeError(f"CHUCK /api/predict が {e.code}: {e.read()[:200]!r}") from e
         raise RuntimeError("CHUCK の計算回数上限に達しました")
+
+
+def fetch_effective_ssn(base_url: str, year: int, month: int, timeout: float = 60.0) -> tuple[float | None, dict]:
+    """CHUCK の実効 SSN（GET /api/effective-ssn）. GIRO の foF2 観測に VOACAP の foF2 が一致する SSN の中央値.
+
+    対象は当月（UTC）だけ。観測局が足りないときは (None, 応答) を返す。
+    """
+    url = f"{base_url.rstrip('/')}/api/effective-ssn?year={year}&month={month}"
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        snap = json.loads(r.read())
+    return snap.get("value"), snap
