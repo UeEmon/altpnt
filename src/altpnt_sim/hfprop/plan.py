@@ -81,14 +81,17 @@ def choose_row(rows: list[dict], rel_min: float) -> dict | None:
     return max(ok, key=lambda r: ((r.get("rel") or 0) - 0.2 * (r.get("mprob") or 0), r.get("snr_dbhz") or -999))
 
 
-def plan_link(hours: list[dict], dist_km: float, rel_min: float = 0.8, ground_wave_km: float = 300.0) -> list[LinkHour]:
+def plan_link(hours: list[dict], dist_km: float, rel_min: float = 0.8, ground_wave_km: float = 300.0,
+              muf_factor: float = 1.0) -> list[LinkHour]:
+    """muf_factor < 1 は電離層嵐で MUF が下がった状態: MUF×muf_factor を超える周波数は使わない."""
     out = []
     for b in hours:
         if dist_km <= ground_wave_km:
             out.append(LinkHour(b["hour_utc"], True, "ground", None, None, None, None, None, None, b["muf_mhz"],
                                 dist_km, 1.0, 0.0))
             continue
-        r = choose_row(b["rows"], rel_min)
+        rows = b["rows"] if muf_factor >= 1 else [r for r in b["rows"] if r["freq_mhz"] <= muf_factor * b["muf_mhz"]]
+        r = choose_row(rows, rel_min)
         if r is None:
             out.append(LinkHour(b["hour_utc"], False, "none", None, None, None, None, None, None, b["muf_mhz"],
                                 dist_km, 1.0, 0.0))

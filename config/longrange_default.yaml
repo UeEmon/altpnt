@@ -30,3 +30,19 @@ ground_wave_sigma_km: 0.3
 diff: {sigma_km: 0.2, radius_km: 200}   # 作戦海域の参照ブイ（到着時に投下）による差分補正の残差と有効半径
 
 modes: [ins_only, model, realtime, differential]
+
+integrity:
+  mode: fde                      # none: 検定なし / detect: 異常なら更新を捨てる / fde: 1 局ずつ除いて検定し直す
+  pfa: 0.001                     # 誤警報確率（カイ二乗検定の閾値）
+  k_hpl: 5.33                    # 保護レベル = k × 位置誤差楕円の長軸 σ（見逃し確率 1e-7 相当の係数）
+  adaptive_cfg: {window: 30, trigger: 5, inflate: 3.0}   # --adaptive: 直近 30 回の測定で 5 回検知したら残差 σ を 3 倍
+  inflate: 3.0                   # --sw-alert（宇宙天気警報で嵐を知る）ときの倍率
+
+scenarios:                       # 時刻は GPS ロスト後の経過時間 [h]
+  nominal: []
+  flare:                         # 太陽フレア: 進出中に 1.5 時間、昼側の経路が全滅
+    - {type: flare, start_h: 2.0, duration_h: 1.5}
+  storm:                         # 電離層嵐（負相）: 作戦海域で 6 時間。反射高度 +40 km、MUF 0.7 倍、残差 2 倍
+    - {type: storm, start_h: 3.5, duration_h: 6.0, ramp_h: 1.0, dh_km: 40, muf_factor: 0.7, sigma_factor: 2.0}
+  jam_iwoto:                     # 硫黄島の送信所が 3 時間停止（妨害・障害）
+    - {type: outage, station: 硫黄島, start_h: 3.0, duration_h: 3.0}
