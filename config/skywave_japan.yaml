@@ -1,0 +1,52 @@
+# 上空波 Rx-TDOA の時間帯別評価（CHUCK / VOACAP で周波数計画）
+# altpnt-skywave --config config/skywave_japan.yaml --out out/skywave
+
+stations:                       # 送信所（既知位置）
+  青森: [40.82, 140.74]
+  千葉: [35.61, 140.12]
+  広島: [34.39, 132.46]
+  鹿児島: [31.60, 130.56]
+  沖縄: [26.21, 127.68]
+  硫黄島: [24.78, 141.32]
+
+extra_stations:                 # --with で追加して比較する候補
+  南鳥島: [24.29, 153.98]
+  与那国: [24.47, 123.00]
+
+center: [34.0, 135.0]           # 方位・距離で指定する評価点の基準
+points:                         # [方位deg, 距離NM] または [緯度, 経度]（latlon: true）
+  東1000NM: {bearing: 90, nm: 1000}
+  南東1000NM: {bearing: 135, nm: 1000}
+  南1000NM: {bearing: 180, nm: 1000}
+  南西1000NM: {bearing: 225, nm: 1000}
+  南1500NM: {bearing: 180, nm: 1500}
+  小笠原: {latlon: [27.1, 142.2]}
+  フィリピン海: {latlon: [20.0, 135.0]}
+  南鳥島付近: {latlon: [24.3, 154.5]}
+  グアム付近: {latlon: [13.4, 144.8]}
+  台湾東方: {latlon: [23.5, 123.5]}
+  東シナ海: {latlon: [29.0, 125.0]}
+
+epochs:                         # 季節ごとに評価（SSN は平滑黒点数の想定値。CHUCK で NOAA 値を確認して更新する）
+  - {year: 2026, month: 10, ssn: 100}
+  - {year: 2027, month: 1, ssn: 90}
+  - {year: 2027, month: 4, ssn: 85}
+  - {year: 2027, month: 7, ssn: 75}
+
+frequencies: [3.0, 4.5, 6.0, 7.5, 9.0, 11.0, 13.5, 16.0, 19.0, 23.0, 28.0]   # VOACAP は 11 周波数まで。昼の長距離は MUF が 30 MHz を超えるので上端を高めに
+
+link:                           # CHUCK /api/predict に渡す回線条件
+  power_w: 1000
+  tx_antenna: monopole
+  tx_params: {length_m: 10}
+  rx_antenna: whip              # 航空機・ブイの受信アンテナ
+  noise: 155                    # 3 MHz での人工雑音 [dBW]（155 = 静穏な地域。洋上を想定）
+  min_angle: 3
+  bandwidth: 5K00               # パイロット付き OFDM の占有帯域
+  inband_snr_db: 6              # TOA 推定に必要な帯域内 SNR
+
+rel_min: 0.8                    # この信頼度以上の周波数がある時刻だけ、その送信所を使う
+ground_wave_km: 300             # これ以内は地表波として扱う（VOACAP は地表波を計算しない）
+ground_wave_sigma_km: 0.3
+diff_sigma_km: 0.2              # 近くの参照点で差分補正したときの距離誤差（仮定）
+tiers: [model, realtime, differential]
