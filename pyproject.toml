@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "altpnt-sim"
+version = "0.1.0"
+description = "GPS拒否環境下における哨戒機用 代替PNT・ソノブイネットワーク位置補正シミュレータ"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.8"]
+gateway = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
+aqua = ["aqua-drift-simulator @ git+https://github.com/UeEmon/aqua-drift-simulator.git#subdirectory=backend"]
+dev = ["pytest>=8", "matplotlib>=3.8"]
+
+[project.scripts]
+altpnt-run = "altpnt_sim.scenario:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

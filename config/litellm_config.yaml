@@ -1,0 +1,41 @@
+# LiteLLM Proxy 設定
+# アプリ側は常に「論理モデル名」（edge-fast / cloud-analyst）だけを指定する。
+# 実体（ローカル Ollama ↔ クラウド Claude/GPT）の差し替えはこのファイルだけで完結させる。
+
+model_list:
+  # --- エッジ用：軽量・低遅延。既定はローカル Ollama ---
+  - model_name: edge-fast
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_API_BASE   # 例: http://host.docker.internal:11434
+
+  # --- クラウド用：大規模解析。既定は Claude ---
+  - model_name: cloud-analyst
+    litellm_params:
+      model: anthropic/claude-sonnet-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # --- 代替（フォールバック先） ---
+  - model_name: cloud-analyst-alt
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 30
+  # クラウドが落ちた場合は代替、エッジが落ちた場合はクラウドへ逃がす
+  fallbacks:
+    - cloud-analyst: [cloud-analyst-alt]
+    - edge-fast: [cloud-analyst]
+
+litellm_settings:
+  drop_params: true          # モデル非対応パラメータは捨てる（既存API互換の担保）
+  cache: true
+  cache_params:
+    type: local
+  max_tokens: 1024           # 帯域制約を意識したトークン上限
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

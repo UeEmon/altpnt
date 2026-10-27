@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.env
+out/
+data/rtlsdr/*.cu8
+data/rtlsdr/*.npy
