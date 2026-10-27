@@ -1,0 +1,42 @@
+title: altpnt 代替PNTシミュレータ
+description: altpnt を OCI Compute（Ubuntu 22.04 + Docker Compose）に展開します
+schemaVersion: 1.1.0
+version: "20261027"
+locale: ja
+
+variableGroups:
+  - title: 基本
+    variables: [compartment_ocid, name, ssh_public_key, allowed_cidr, expose_api]
+  - title: インスタンス
+    variables: [shape, ocpus, memory_gb, boot_volume_gb, ad_index]
+  - title: アプリケーション
+    variables: [repo_url, repo_ref, anthropic_api_key, openai_api_key]
+  - title: 自動設定
+    visible: false
+    variables: [tenancy_ocid, region]
+
+variables:
+  compartment_ocid:
+    type: oci:identity:compartment:id
+    title: コンパートメント
+    required: true
+  ssh_public_key:
+    type: oci:core:ssh:publickey
+    title: SSH 公開鍵
+    required: true
+  allowed_cidr:
+    type: string
+    title: 接続を許可する CIDR（例 203.0.113.10/32）
+  expose_api:
+    type: boolean
+    title: cloud API(8080) をインターネットに公開する
+  shape:
+    type: enum
+    title: シェイプ
+    enum: [VM.Standard.A1.Flex, VM.Standard.E4.Flex, VM.Standard.E5.Flex]
+  anthropic_api_key:
+    type: password
+    title: Anthropic API キー（任意）
+  openai_api_key:
+    type: password
+    title: OpenAI API キー（任意）

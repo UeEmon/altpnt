@@ -5,3 +5,7 @@ __pycache__/
 out/
 data/rtlsdr/*.cu8
 data/rtlsdr/*.npy
+deploy/oci/*.zip
+deploy/oci/.terraform/
+deploy/oci/*.tfstate*
+deploy/oci/terraform.tfvars
