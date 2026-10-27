@@ -19,6 +19,8 @@ cp .env.example .env        # API キーと OLLAMA_API_BASE を設定
 docker compose up --build   # cloud API: http://localhost:8080/docs, LiteLLM: :4000
 ```
 
+Oracle Cloud へのデプロイは [`deploy/oci/README.md`](deploy/oci/README.md)（Resource Manager 用 Terraform スタック）。
+
 ## 構成
 
 ```

@@ -13,8 +13,9 @@ services:
     volumes:
       - ./config/litellm_config.yaml:/app/config.yaml:ro
     env_file: [.env]
-    ports: ["4000:4000"]
+    ports: ["127.0.0.1:4000:4000"]     # 外部公開しない（SSH トンネル経由で利用）
     networks: [edge_net, cloud_net]
+    restart: unless-stopped
 
   edge:
     build: { context: ., dockerfile: services/edge/Dockerfile }
@@ -28,7 +29,8 @@ services:
       - ./data:/app/data
       - ./out:/app/out
     networks: [edge_net]
-    depends_on: [litellm]
+    depends_on:
+      litellm: { condition: service_started, required: false }   # LLM 無しでもシミュレーションは動く
 
   cloud:
     build: { context: ., dockerfile: services/cloud/Dockerfile }
@@ -40,9 +42,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./out:/app/out
-    ports: ["8080:8080"]
+    ports: ["${CLOUD_BIND:-127.0.0.1}:8080:8080"]   # CLOUD_BIND=0.0.0.0 で外部公開
     networks: [cloud_net]
-    depends_on: [litellm]
+    restart: unless-stopped
+    depends_on:
+      litellm: { condition: service_started, required: false }
 
 networks:
   edge_net: {}

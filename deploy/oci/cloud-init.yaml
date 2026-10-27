@@ -1,0 +1,57 @@
+#cloud-config
+# altpnt セットアップ（Terraform templatefile で展開される。$${...} はシェル変数としてそのまま残る）
+package_update: true
+packages: [git, ca-certificates, curl]
+
+write_files:
+  - path: /opt/altpnt-setup.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      exec >>/var/log/altpnt-setup.log 2>&1
+      echo "=== altpnt setup start $(date -Is)"
+
+      # Docker Engine + compose plugin
+      if ! command -v docker >/dev/null; then
+        curl -fsSL https://get.docker.com | sh
+      fi
+      usermod -aG docker ubuntu || true
+      systemctl enable --now docker
+
+      # リポジトリ
+      if [ ! -d /opt/altpnt/.git ]; then
+        git clone "${repo_url}" /opt/altpnt
+      fi
+      cd /opt/altpnt
+      git fetch --all --prune
+      git checkout "${repo_ref}"
+      git pull --ff-only || true
+
+      # .env（既存があれば保持）
+      if [ ! -f .env ]; then
+        cat > .env <<EOF
+      LITELLM_MASTER_KEY=sk-$(openssl rand -hex 24)
+      ANTHROPIC_API_KEY=${anthropic_api_key}
+      OPENAI_API_KEY=${openai_api_key}
+      OLLAMA_API_BASE=http://host.docker.internal:11434
+      CLOUD_BIND=${cloud_bind}
+      EOF
+        chmod 600 .env
+      fi
+      chown -R ubuntu:ubuntu /opt/altpnt
+
+      # cloud API と LiteLLM は常駐、edge はシナリオを 1 回実行して終了
+      docker compose up -d --build cloud
+      docker compose up -d litellm || echo "WARN: litellm の起動に失敗（LLM 解析以外は動作）"
+      docker compose run --rm edge || echo "WARN: edge シナリオ実行に失敗"
+
+      # ホスト側ファイアウォール（Ubuntu イメージの iptables）で 8080 を開ける（公開時のみ）
+      if [ "${cloud_bind}" = "0.0.0.0" ]; then
+        iptables -I INPUT 6 -m state --state NEW -p tcp --dport 8080 -j ACCEPT
+        netfilter-persistent save || true
+      fi
+      curl -fsS http://127.0.0.1:8080/health && echo "=== altpnt ready $(date -Is)"
+
+runcmd:
+  - [bash, /opt/altpnt-setup.sh]
