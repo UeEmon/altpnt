@@ -19,7 +19,11 @@ cp .env.example .env        # API キーと OLLAMA_API_BASE を設定
 docker compose up --build   # cloud API: http://localhost:8080/docs, LiteLLM: :4000
 ```
 
-Oracle Cloud へのデプロイは [`deploy/oci/README.md`](deploy/oci/README.md)（Resource Manager 用 Terraform スタック）。
+**本番環境:** 既存の Oracle Cloud VM（[UeEmon/oracle-cloud-deploy](https://github.com/UeEmon/oracle-cloud-deploy)）に相乗りしています。
+`https://altpnt.<IP>.sslip.io/docs`（CHUCK 管理サイトと同じパスワード）。`main` へのマージは 5 分以内に自動で反映されます。
+VM では API（`cloud`）だけが動き、LiteLLM とエッジのシナリオ実行は起動しません。
+
+単独の VM に立てる場合は [`deploy/oci/README.md`](deploy/oci/README.md)（Resource Manager 用 Terraform スタック）。
 
 ## 構成
 
