@@ -101,6 +101,26 @@ altpnt-skywave --ssn-from http://localhost:18082 --out out/skywave_now   # 実�
 補正方式: `model`（反射高度 σ20 km）/ `realtime`（σ5 km）/ `differential`（近くの参照点で差分補正、距離誤差 σ0.2 km は仮定）。
 VOACAP は地表波を計算しないため、`ground_wave_km` 以内は地表波として固定の誤差を置いています。
 
+## 長距離シナリオ（上空波 Rx-TDOA + EKF）
+
+房総沖で GPS を失い、1,000 NM 先の作戦海域へ進出して 4 時間周回し、帰投するまで（約 11 時間）を評価します。
+航路に沿って 150 km ごとに CHUCK で送信所ごと・時刻ごとの周波数を決め、使える局が入れ替わる中で
+EKF（位置・INS 速度バイアス・送信所ごとの電離層バイアス）が INS の誤差をどこまで抑えられるかを、補正方式ごとに比べます。
+
+```bash
+CHUCK_APP_DIR=../VOCAP-COMPATIBILITY-/app VOACAP_BIN=... VOACAP_MODEL=... \
+altpnt-longrange --depart-utc 22 10 --runs 8 --out out/longrange           # 6 局
+altpnt-longrange --with 南鳥島 与那国 --runs 8 --out out/longrange_8        # 8 局
+```
+
+結果（6 局、出発 22 UTC、モンテカルロ 8 回の平均。作戦海域での平均誤差 / 帰投完了時）:
+INS 単独 11.9 / 26.9 km、モデル補正 5.5 / 1.4 km、リアルタイム推定 3.6 / 1.2 km、作戦海域の参照ブイで差分補正 0.55 / 0.8 km。
+出発時刻（22 UTC と 10 UTC）による差は小さい。`consistency`（実際の RMS 誤差 / EKF が見積もる誤差）は 0.6〜1.4。
+
+前提と注意: 電離層の残差は送信所ごとに独立な Gauss-Markov 過程（相関時間はモデル補正 3 時間、ほかは 30 分）で、
+EKF はその統計を正しく知っている。磁気嵐・太陽フレアによる突発的な変化や、局間で相関した誤差は入れていない。
+出発直後に地表波で INS の速度バイアスを較正できることが効いている（地表波なしではモデル補正の作戦海域誤差が 5.5 → 9.2 km）。
+
 ## 次の作業（引継書 Phase 対応）
 
 - Phase 1 残: Apple Silicon 上での compose 動作確認、aqua の layer/route（投下点への経路・横風補正）と Dubins 計画の統合検討

@@ -1,0 +1,32 @@
+# 長距離シナリオ: 房総沖で GPS ロスト → 1,000 NM 先の作戦海域へ進出 → 4 時間周回 → 帰投
+# 送信所・周波数の候補・回線条件は skywave_config から読む
+skywave_config: skywave_japan.yaml
+
+seed: 7
+dt: 1.0
+depart_utc: [22, 4, 10, 16]      # 出発時刻 UTC（JST 7時・13時・19時・1時）ごとに評価
+epoch: {year: 2026, month: 10, ssn: effective, ssn_fallback: 100}
+
+route:
+  start: [35.0, 140.5]           # 房総沖
+  op_area: {bearing: 170, nm: 1000}
+  orbit: {radius_km: 30, duration_h: 4}
+
+aircraft:
+  speed: 150.0                   # [m/s]
+  turn_radius: 4000.0
+  init_pos_sigma: 50.0
+
+ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
+
+route_sample_km: 150             # 航路沿いに CHUCK で予測する間隔
+meas_interval_s: 10
+iono_tau_s:                      # 電離層残差の相関時間 [s]（気候学モデルの誤差は数時間続くことが多い）
+  model: 10800
+  realtime: 1800
+  differential: 1800
+sigma_h_km: {model: 20, realtime: 5}
+ground_wave_sigma_km: 0.3
+diff: {sigma_km: 0.2, radius_km: 200}   # 作戦海域の参照ブイ（到着時に投下）による差分補正の残差と有効半径
+
+modes: [ins_only, model, realtime, differential]
