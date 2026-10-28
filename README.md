@@ -6,7 +6,7 @@
 
 > **確定した前提（2026-10-28）**: 周波数は 3〜30 MHz。**母機は HF を受信しない**。RF ブイの SDR が複数局の HF を受信して
 > VHF で母機に送り、母機は UHF でブイにコマンドを送る。母機の測位は UHF TOA と VHF TDOA の併用。ブイは作戦海域のみ。
-> この前提のシナリオは **`altpnt-buoynet`**。構成・結果・仮定は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+> この前提のシナリオは **`altpnt-buoynet`**（1 機）と **`altpnt-relay`**（交代機、航空機間のデータ引き継ぎなし）。構成・結果・仮定は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 > `altpnt-run` と `altpnt-longrange` は機上で HF を受信する旧前提のシナリオで、比較用に残している。
 
 ## クイックスタート
