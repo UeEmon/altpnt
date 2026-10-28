@@ -53,3 +53,28 @@ def test_single_link_still_works():
     cfg["modes"] = ["realtime"]
     s = BN.summarize(BN.run(cfg, sky, FakeBackend(), depart_utc=22))["modes"]["realtime"]
     assert s["counts"]["vhf"] == 0 and s["counts"]["uhf"] > 0
+
+
+def test_commanded_plan_holds_last_frequency():
+    from altpnt_sim.hfprop.plan import LinkHour
+
+    def lh(h, f):
+        return LinkHour(h, True, "sky", f, 0.9, 60.0, "1F2", 280.0, 0.0, 20.0, 1500.0, 0.99, 0.7)
+
+    links = [[lh(h, 7.5 + h) for h in range(24)]]                  # 1 局、時刻ごとに違う周波数
+    p = BN.CommandedPlan(links, horizon_h=2, update_min=10, deploy_only=True)
+    assert p.freqs(3) is None                                        # 指示前は受信しない
+    p.maybe_command(0.0, 3, in_range=True)
+    assert p.freqs(3) == [10.5] and p.freqs(4) == [11.5]
+    assert p.freqs(9) == [11.5]                                       # 指示の範囲を過ぎたら最後の周波数のまま
+    p.maybe_command(3600.0, 4, in_range=True)
+    assert p.count == 1                                               # deploy_only: 指示し直さない
+
+
+def test_link_for_freq_rejects_unreliable_frequency():
+    from altpnt_sim.hfprop.plan import link_for_freq
+    block = parse_voacap(RAW)[5]
+    ok = link_for_freq(block, 1300.0, 19.0, rel_min=0.8)
+    assert ok.usable and ok.freq_mhz == 19.0
+    bad = link_for_freq(block, 1300.0, 30.0 if block["muf_mhz"] < 25 else 3.0, rel_min=0.99)
+    assert not bad.usable

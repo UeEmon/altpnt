@@ -32,6 +32,7 @@ from .drift import DriftSimulator, OceanCurrentField
 from .dubins.planner import hex_grid
 from .geo import aeqd_inverse, gc_distance_m
 from .hfprop import ChuckEngineBackend, ChuckHttpBackend, chuck_request, plan_link
+from .hfprop.plan import link_for_freq
 from .longrange import build_route, group_path_m, toa_sigma_m, aggregate as _aggregate
 from .nav.ins import INSModel
 from .nav.tdoa import tdoa_cov
@@ -44,13 +45,43 @@ RNP_M = {"RNP-10": 18520.0, "RNP-4": 7408.0, "RNP-2": 3704.0, "RNP-1": 1852.0}
 
 # ------------------------------------------------------------------ HF リンク（作戦海域の中心で時刻別に計画）
 def op_links(sky_cfg, stations, op_ll, epoch, ssn, backend):
-    links = []
+    """作戦海域の中心での周波数計画. 戻り値: (links[局][時] = その時刻の最適な周波数, raw[局] = 24 時間の全周波数, 距離 km)."""
+    links, raw, dist = [], [], []
     for st in stations:
         d_km = float(gc_distance_m(st[0], st[1], *op_ll)) / 1e3
         hours = backend.predict(chuck_request(tuple(st), tuple(op_ll), epoch["year"], epoch["month"], ssn,
                                               sky_cfg["frequencies"], sky_cfg["link"]))
         links.append(plan_link(hours, d_km, sky_cfg["rel_min"], sky_cfg["ground_wave_km"]))
-    return links            # links[局][時]
+        raw.append({b["hour_utc"]: b for b in hours})
+        dist.append(d_km)
+    return links, raw, dist
+
+
+class CommandedPlan:
+    """UHF コマンドでブイに指示された受信周波数（送信所ごと）.
+
+    母機は CHUCK の計画のうち、今の時刻から horizon_h 時間分をコマンドで送る。ブイは指示された時刻の周波数を
+    受信し、指示の範囲を過ぎたら最後に指示された周波数を使い続ける。母機がブイ網の UHF 範囲にいる間は
+    update_min ごとに指示し直す（deploy_only なら投下時の 1 回だけ）。
+    """
+
+    def __init__(self, links, horizon_h: int, update_min: float, deploy_only: bool):
+        self.links, self.horizon, self.update_s, self.once = links, max(1, int(horizon_h)), update_min * 60, deploy_only
+        self.table: dict[int, list[float | None]] = {}
+        self.last_t = -1e18
+        self.count = 0
+
+    def maybe_command(self, t_s: float, hour: int, in_range: bool) -> None:
+        if not in_range or (self.once and self.count) or t_s - self.last_t < self.update_s:
+            return
+        self.table = {(hour + k) % 24: [per[(hour + k) % 24].freq_mhz for per in self.links] for k in range(self.horizon)}
+        self.last_hour = (hour + self.horizon - 1) % 24
+        self.last_t, self.count = t_s, self.count + 1
+
+    def freqs(self, hour: int) -> list[float | None] | None:
+        if not self.table:
+            return None
+        return self.table.get(hour, self.table[self.last_hour])
 
 
 def iono_sigma_m(lh, tier, cfg) -> float:
@@ -78,7 +109,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
     T = len(t)
     t_arr = phases["作戦海域"][0]
     i_arr = int(np.searchsorted(t, t_arr))
-    links = op_links(sky_cfg, stations, op_ll, cfg["epoch"], ssn, backend)
+    links, raw, dist_op = op_links(sky_cfg, stations, op_ll, cfg["epoch"], ssn, backend)
+    cmdc = cfg.get("command", {})
     hour_of = ((depart_utc + t / 3600.0) % 24).astype(int)
     tl = Timeline(events, t, names, cfg["epoch"]["year"], cfg["epoch"]["month"], depart_utc)
 
@@ -141,7 +173,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
         seen = np.zeros(N, bool)
         est = np.empty((T, 2)); sd = np.empty(T)
         net_abs = np.full(T, np.nan); net_rel = np.full(T, np.nan); n_buoy = np.zeros(T, int)
-        stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0}
+        stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0, "commands": 0, "stale_freq_lost": 0}
+        plan = CommandedPlan(links, cmdc.get("horizon_h", 1), cmdc.get("update_min", 10), cmdc.get("deploy_only", False))
         Sc = np.zeros((2, 2))          # ブイ網全体の平行移動（重心の推定誤差）の共分散
         last_fix, handed_over = -1, True
         for i in range(T):
@@ -183,7 +216,14 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 Pn = Fn @ Pn @ Fn.T + np.diag(Qn)
             if xn is not None and (i - i_arr) % k_cyc == 0 and i >= i_arr:
                 # ---- ブイの HF 受信（時分割で全局を一巡したとみなす）
-                lk = [links[s][hour_of[i]] for s in range(N)]
+                # ブイは UHF で指示された周波数を受信する（指示が古いと MUF の変化で受からなくなる）
+                near = bool(np.any(np.hypot(*(bpos[i] - P_true[i]).T) <= lkc["range_km"] * 1e3))
+                plan.maybe_command(t[i], int(hour_of[i]), near or i == i_arr)
+                fq = plan.freqs(int(hour_of[i]))
+                lk = [link_for_freq(raw[s][int(hour_of[i])], dist_op[s], fq[s] if fq else None,
+                                    sky_cfg["rel_min"], sky_cfg["ground_wave_km"]) for s in range(N)]
+                stats["stale_freq_lost"] += sum(1 for s in range(N) if links[s][hour_of[i]].usable and not lk[s].usable)
+                stats["commands"] = plan.count
                 cen = np.nanmean(bpos[i], axis=0)
                 cla, clo = aeqd_inverse(cen[0], cen[1], *origin)
                 use = [s for s in range(N) if lk[s].usable
@@ -371,12 +411,19 @@ def main(argv=None):
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--scenario", nargs="*")
     ap.add_argument("--links", choices=["both", "uhf", "vhf"], help="母機の測位に使うリンク（config を上書き）")
+    ap.add_argument("--command-once", action="store_true", help="受信周波数の指示を投下時の 1 回だけにする")
+    ap.add_argument("--command-horizon", type=int, help="1 回の指示で送る周波数計画の時間幅 [h]")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
     sky_path = Path(cfg["skywave_config"])
     if not sky_path.is_absolute():
         sky_path = Path(a.config).resolve().parent / sky_path
     sky_cfg = yaml.safe_load(sky_path.read_text(encoding="utf-8"))
+    cfg.setdefault("command", {})
+    if a.command_once:
+        cfg["command"]["deploy_only"] = True
+    if a.command_horizon:
+        cfg["command"]["horizon_h"] = a.command_horizon
     if a.links:
         cfg["links"]["uhf"]["enabled"] = a.links in ("both", "uhf")
         cfg["links"]["vhf"]["enabled"] = a.links in ("both", "vhf")

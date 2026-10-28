@@ -27,6 +27,11 @@ buoys:
 
 drift: {mean_current: [0.25, 0.10], wind: [8.0, 3.0], diffusivity: 5.0}
 
+command:                          # 母機 → ブイの UHF コマンドで受信周波数（送信所ごと）を指示する
+  horizon_h: 1                    # 1 回のコマンドで送る計画の時間幅（時刻ごとの周波数）
+  update_min: 10                  # 母機が UHF 範囲にいる間、指示し直す間隔
+  deploy_only: false              # true: 投下時の 1 回だけ指示（母機が戻らない場合）
+
 hf_buoy:
   cycle_s: 12                     # SDR が全局を時分割で一巡する周期（6 局 × 2 s）
   per_buoy_decorr: 0.03           # 電離層誤差のうちブイごとに異なる割合（ブイ間は数十 km で、ほぼ共通）

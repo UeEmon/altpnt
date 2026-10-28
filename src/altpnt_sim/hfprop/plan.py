@@ -96,12 +96,29 @@ def plan_link(hours: list[dict], dist_km: float, rel_min: float = 0.8, ground_wa
             out.append(LinkHour(b["hour_utc"], False, "none", None, None, None, None, None, None, b["muf_mhz"],
                                 dist_km, 1.0, 0.0))
             continue
-        h, n = r["vhite_km"], hops_of(r.get("mode"))
-        dPdD = (group_path_km(dist_km + 1, h, n) - group_path_km(dist_km - 1, h, n)) / 2
-        dPdh = (group_path_km(dist_km, h + 1, n) - group_path_km(dist_km, h - 1, n)) / 2
-        out.append(LinkHour(b["hour_utc"], True, "sky", r["freq_mhz"], r["rel"], r.get("snr_dbhz"), r.get("mode"),
-                            h, r.get("mprob") or 0.0, b["muf_mhz"], dist_km, dPdD, dPdh))
+        out.append(_sky_link(b, r, dist_km))
     return out
+
+
+def _sky_link(b: dict, r: dict, dist_km: float) -> LinkHour:
+    h, n = r["vhite_km"], hops_of(r.get("mode"))
+    dPdD = (group_path_km(dist_km + 1, h, n) - group_path_km(dist_km - 1, h, n)) / 2
+    dPdh = (group_path_km(dist_km, h + 1, n) - group_path_km(dist_km, h - 1, n)) / 2
+    return LinkHour(b["hour_utc"], True, "sky", r["freq_mhz"], r["rel"], r.get("snr_dbhz"), r.get("mode"),
+                    h, r.get("mprob") or 0.0, b["muf_mhz"], dist_km, dPdD, dPdh)
+
+
+def link_for_freq(block: dict, dist_km: float, freq_mhz: float | None, rel_min: float = 0.8,
+                  ground_wave_km: float = 300.0) -> LinkHour:
+    """指定された周波数（UHF コマンドでブイに指示された周波数）で、その時刻に受信できるか."""
+    if dist_km <= ground_wave_km:
+        return LinkHour(block["hour_utc"], True, "ground", None, None, None, None, None, None, block["muf_mhz"],
+                        dist_km, 1.0, 0.0)
+    r = next((r for r in block["rows"] if freq_mhz is not None and abs(r["freq_mhz"] - freq_mhz) < 1e-6), None)
+    if r is None or (r.get("rel") or 0) < rel_min or not r.get("vhite_km"):
+        return LinkHour(block["hour_utc"], False, "none", freq_mhz, r.get("rel") if r else None, None, None, None, None,
+                        block["muf_mhz"], dist_km, 1.0, 0.0)
+    return _sky_link(block, r, dist_km)
 
 
 def range_sigma_km(lh: LinkHour, tier: str, bandwidth_hz: float = 5000.0, integ_s: float = 1.0,
