@@ -78,3 +78,33 @@ def test_link_for_freq_rejects_unreliable_frequency():
     assert ok.usable and ok.freq_mhz == 19.0
     bad = link_for_freq(block, 1300.0, 30.0 if block["muf_mhz"] < 25 else 3.0, rel_min=0.99)
     assert not bad.usable
+
+
+def test_emission_designator_sets_bandwidth():
+    from altpnt_sim.hfprop.chuck import chuck_request, parse_emission
+    assert parse_emission("3K00J2D") == ("3K00", "J2D", 3000.0)
+    assert parse_emission("24K0J2D")[2] == 24000.0
+    req = chuck_request((24.78, 141.32), (13.4, 144.8), 2026, 10, 100, [9.0], {"emission": "6K00G7W"})
+    assert req["bandwidth"] == "6K00" and req["modulation"] == "G7W" and req["snr_input"] == "bandwidth"
+
+
+def test_wider_band_and_simultaneous_reception_reduce_toa_noise():
+    from altpnt_sim.hfprop.plan import LinkHour
+    lh = LinkHour(0, True, "sky", 9.0, 0.95, 42.0, "1F2", 280.0, 0.0, 20.0, 1500.0, 0.99, 0.7)   # 弱い信号
+    narrow = BN.buoy_toa_sigma_m(lh, 3000.0, 10.0)
+    wide = BN.buoy_toa_sigma_m(lh, 24000.0, 10.0)
+    tdm = BN.buoy_toa_sigma_m(lh, 3000.0, 10.0 / 6)            # 時分割（6 局）
+    assert wide < narrow < tdm
+    assert BN.vhf_report_bps(8, 10.0) < 120_000                   # 測定結果の送信は VHF 120 kbps に十分収まる
+
+
+def test_buoys_stop_after_lifetime():
+    cfg, sky = _cfg()
+    cfg["buoys"]["lifetime_h"] = 0.5
+    cfg["modes"] = ["realtime"]
+    out = BN.run(cfg, sky, FakeBackend(), depart_utc=22)
+    t = out["t"]
+    a, b = out["phases"]["作戦海域"]
+    r = out["results"]["realtime"]
+    after = (t > a + 0.5 * 3600 + 60) & (t < b)
+    assert out["buoy_end_h"] is not None and (r["n_buoy"][after] == 0).all()

@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from .hfprop.chuck import link_bandwidth_hz
 from .hfprop import ChuckEngineBackend, ChuckHttpBackend, chuck_request, fetch_effective_ssn, plan_link, position_error
 from .hfprop.plan import destination, gc_dist_az
 
@@ -65,8 +66,7 @@ def run(cfg: dict, backend, with_extra: list[str] | None = None, ssn_url: str | 
     st_names, st_pos = list(stations), [tuple(v) for v in stations.values()]
     points = resolve_points(cfg)
     kw = dict(ground_wave_sigma_km=cfg["ground_wave_sigma_km"], diff_sigma_km=cfg["diff_sigma_km"],
-              bandwidth_hz=float(cfg["link"].get("bandwidth", "5K00").upper().replace("K", ".")) * 1e3
-              if "bandwidth" in cfg["link"] else 5000.0)
+              bandwidth_hz=link_bandwidth_hz(cfg["link"]))
     plan_rows, err_rows, ssn_used = [], [], {}
     for ep in cfg["epochs"]:
         ssn, src = resolve_ssn(ep, ssn_url)

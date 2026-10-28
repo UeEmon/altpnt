@@ -33,7 +33,9 @@ from .dubins.planner import hex_grid
 from .geo import aeqd_inverse, gc_distance_m
 from .hfprop import ChuckEngineBackend, ChuckHttpBackend, chuck_request, plan_link
 from .hfprop.plan import link_for_freq
-from .longrange import build_route, group_path_m, toa_sigma_m, aggregate as _aggregate
+from .constants import C
+from .hfprop.chuck import link_bandwidth_hz, parse_emission
+from .longrange import build_route, group_path_m, aggregate as _aggregate
 from .nav.ins import INSModel
 from .nav.tdoa import tdoa_cov
 from .skywave import resolve_ssn
@@ -44,13 +46,17 @@ RNP_M = {"RNP-10": 18520.0, "RNP-4": 7408.0, "RNP-2": 3704.0, "RNP-1": 1852.0}
 
 
 # ------------------------------------------------------------------ HF リンク（作戦海域の中心で時刻別に計画）
-def op_links(sky_cfg, stations, op_ll, epoch, ssn, backend):
-    """作戦海域の中心での周波数計画. 戻り値: (links[局][時] = その時刻の最適な周波数, raw[局] = 24 時間の全周波数, 距離 km)."""
+def op_links(sky_cfg, stations, op_ll, epoch, ssn, backend, emissions=None):
+    """作戦海域の中心での周波数計画. 戻り値: (links[局][時] = その時刻の最適な周波数, raw[局] = 24 時間の全周波数, 距離 km).
+
+    emissions[局] は送信所ごとの電波型式（帯域幅は電波型式で決まり、CHUCK の要求 SNR の帯域換算に使う）。
+    """
     links, raw, dist = [], [], []
-    for st in stations:
+    for k, st in enumerate(stations):
         d_km = float(gc_distance_m(st[0], st[1], *op_ll)) / 1e3
         hours = backend.predict(chuck_request(tuple(st), tuple(op_ll), epoch["year"], epoch["month"], ssn,
-                                              sky_cfg["frequencies"], sky_cfg["link"]))
+                                              sky_cfg["frequencies"], sky_cfg["link"],
+                                              emission=emissions[k] if emissions else None))
         links.append(plan_link(hours, d_km, sky_cfg["rel_min"], sky_cfg["ground_wave_km"]))
         raw.append({b["hour_utc"]: b for b in hours})
         dist.append(d_km)
@@ -90,6 +96,21 @@ def iono_sigma_m(lh, tier, cfg) -> float:
     return lh.dPdh * cfg["sigma_h_km"][tier] * 1e3 * (1 + 2 * (lh.mprob or 0))
 
 
+def buoy_toa_sigma_m(lh, bandwidth_hz: float, integ_s: float) -> float:
+    """ブイでの包絡線 TOA の CRLB. 帯域幅（電波型式）と積分時間（同時受信なら測定間隔そのもの）で決まる."""
+    if lh.kind == "ground":
+        return 50.0
+    inband = (lh.snr_dbhz or 0) - 10 * math.log10(bandwidth_hz)
+    beta = bandwidth_hz / math.sqrt(12)
+    return max(C / (2 * math.pi * beta * math.sqrt(2 * 10 ** (inband / 10) * bandwidth_hz * integ_s)), 10.0)
+
+
+def vhf_report_bps(n_stations: int, cycle_s: float, bits_per_station: int = 96, header_bits: int = 192,
+                   overhead: float = 0.15) -> float:
+    """ブイ 1 本が VHF で送る測定結果のビットレート（局ごとの TOA・品質・周波数 ＋ 位置・時計のヘッダ）."""
+    return (header_bits + n_stations * bits_per_station) / cycle_s * (1 + overhead)
+
+
 def slant(p, q, alt):
     return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + alt * alt)
 
@@ -109,7 +130,11 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
     T = len(t)
     t_arr = phases["作戦海域"][0]
     i_arr = int(np.searchsorted(t, t_arr))
-    links, raw, dist_op = op_links(sky_cfg, stations, op_ll, cfg["epoch"], ssn, backend)
+    hb0 = cfg["hf_buoy"]
+    by_st = hb0.get("emission_by_station", {}) or {}
+    emissions = [by_st.get(nm, sky_cfg["link"].get("emission")) for nm in names]
+    bw_hz = [parse_emission(e)[2] if e else link_bandwidth_hz(sky_cfg["link"]) for e in emissions]
+    links, raw, dist_op = op_links(sky_cfg, stations, op_ll, cfg["epoch"], ssn, backend, emissions)
     cmdc = cfg.get("command", {})
     hour_of = ((depart_utc + t / 3600.0) % 24).astype(int)
     tl = Timeline(events, t, names, cfg["epoch"]["year"], cfg["epoch"]["month"], depart_utc)
@@ -157,6 +182,10 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
 
     hb, lkc = cfg["hf_buoy"], cfg["links"]
     k_cyc = int(round(hb["cycle_s"] / dt))
+    # 同時受信なら各局を測定間隔いっぱい積分できる。時分割なら局数で割った時間だけ
+    integ_s = hb["cycle_s"] if hb.get("simultaneous", True) else hb["cycle_s"] / N
+    i_end = i_arr + int(round(cfg["buoys"].get("lifetime_h", 8.0) * 3600 / dt))    # ブイの稼働時間（電池）
+    vhf_bps = vhf_report_bps(N, hb["cycle_s"])
     results = {}
     for mode in cfg["modes"]:
         tau = float(taus.get(mode, 1800.0))
@@ -214,7 +243,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 Qn[6 * B:] = sig_e**2 * (1 - a1 * a1)
                 xn = Fn @ xn
                 Pn = Fn @ Pn @ Fn.T + np.diag(Qn)
-            if xn is not None and (i - i_arr) % k_cyc == 0 and i >= i_arr:
+            alive = i_arr <= i < i_end
+            if xn is not None and alive and (i - i_arr) % k_cyc == 0:
                 # ---- ブイの HF 受信（時分割で全局を一巡したとみなす）
                 # ブイは UHF で指示された周波数を受信する（指示が古いと MUF の変化で受からなくなる）
                 near = bool(np.any(np.hypot(*(bpos[i] - P_true[i]).T) <= lkc["range_km"] * 1e3))
@@ -250,7 +280,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                         for s in use:
                             sg_true = iono_sigma_m(lk[s], mode, cfg) * tl.sigma_factor(i)
                             e_true = sg_true * U[i, s] + (tl.storm_bias_m(i, lk[s].dPdh, mode) if lk[s].kind == "sky" else 0.0)
-                            sig_toa = math.hypot(toa_sigma_m(lk[s]), hb["per_buoy_decorr"] * sg_true)
+                            sig_toa = math.hypot(buoy_toa_sigma_m(lk[s], bw_hz[s], integ_s), hb["per_buoy_decorr"] * sg_true)
                             zs.append(group_path_m(float(la_t), float(lo_t), stations[s], lk[s]) + e_true
                                       + clk[i, b] + sig_toa * noise_hf[i, b, s])
                             g0 = group_path_m(float(la_e), float(lo_e), stations[s], lk[s])
@@ -270,7 +300,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                     xn = xn + K @ y
                     IKH = np.eye(nb) - K @ H
                     Pn = IKH @ Pn @ IKH.T + K @ R @ K.T
-            if xn is not None and i >= i_arr:
+            if xn is not None and alive:
                 A = np.zeros((2, nb))
                 for b in range(B):
                     A[:, 6 * b:6 * b + 2] += np.eye(2) / B
@@ -324,13 +354,16 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             "phases": phases, "results": results, "stations": names, "station_ll": stations, "buoys": bpos,
             "depart_utc": depart_utc, "ssn": ssn, "ssn_source": ssn_src, "events": events or [],
             "storm": tl.storm, "flare": tl.flare,
-            "links_at_op": [[(lh.freq_mhz, lh.usable) for lh in per] for per in links]}
+            "links_at_op": [[(lh.freq_mhz, lh.usable) for lh in per] for per in links],
+            "buoy_end_h": float(t[min(i_end, T - 1)] / 3600) if i_end < T else None,
+            "emissions": dict(zip(names, emissions)), "vhf_report_bps": round(vhf_bps, 1)}
 
 
 def summarize(out: dict) -> dict:
     t = out["t"]
     s = {"depart_utc": out["depart_utc"], "ssn": out["ssn"], "ssn_source": out["ssn_source"], "events": out["events"],
-         "stations": out["stations"], "duration_h": round(t[-1] / 3600, 1), "modes": {}}
+         "stations": out["stations"], "duration_h": round(t[-1] / 3600, 1), "emissions": out["emissions"],
+         "vhf_report_bps": out["vhf_report_bps"], "buoy_end_h": out["buoy_end_h"], "modes": {}}
     for mode, r in out["results"].items():
         m = {}
         for ph, (a, b) in out["phases"].items():
@@ -412,6 +445,9 @@ def main(argv=None):
     ap.add_argument("--scenario", nargs="*")
     ap.add_argument("--links", choices=["both", "uhf", "vhf"], help="母機の測位に使うリンク（config を上書き）")
     ap.add_argument("--command-once", action="store_true", help="受信周波数の指示を投下時の 1 回だけにする")
+    ap.add_argument("--emission", help="全送信所の電波型式（例 3K00J2D, 24K0J2D）。config を上書き")
+    ap.add_argument("--lifetime-h", type=float, help="ブイの稼働時間 [h]（既定 8）")
+    ap.add_argument("--orbit-h", type=float, help="作戦海域での周回時間 [h]")
     ap.add_argument("--command-horizon", type=int, help="1 回の指示で送る周波数計画の時間幅 [h]")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -419,7 +455,14 @@ def main(argv=None):
     if not sky_path.is_absolute():
         sky_path = Path(a.config).resolve().parent / sky_path
     sky_cfg = yaml.safe_load(sky_path.read_text(encoding="utf-8"))
+    if a.emission:
+        sky_cfg["link"]["emission"] = a.emission
+        cfg["hf_buoy"]["emission_by_station"] = {}
     cfg.setdefault("command", {})
+    if a.lifetime_h:
+        cfg["buoys"]["lifetime_h"] = a.lifetime_h
+    if a.orbit_h:
+        cfg["route"]["orbit"]["duration_h"] = a.orbit_h
     if a.command_once:
         cfg["command"]["deploy_only"] = True
     if a.command_horizon:

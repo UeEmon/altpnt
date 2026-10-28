@@ -17,6 +17,7 @@ ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
 
 buoys:
   n: 7                            # PNT 用 G サイズ RF ブイ（5〜9 本）
+  lifetime_h: 8                   # 稼働時間（電池）。投下から 8 時間で HF 受信も UHF/VHF も止まる
   spacing_km: 15
   accel_psd: 1.0e-7               # 漂流速度の変化（推定器のプロセス雑音 [m²/s³]）
   clock:                          # ブイの時計（距離換算）。OCXO 相当
@@ -33,7 +34,9 @@ command:                          # 母機 → ブイの UHF コマンドで受�
   deploy_only: false              # true: 投下時の 1 回だけ指示（母機が戻らない場合）
 
 hf_buoy:
-  cycle_s: 12                     # SDR が全局を時分割で一巡する周期（6 局 × 2 s）
+  simultaneous: true              # SDR は UHF で指示された複数の周波数を同時に受信する
+  cycle_s: 10                     # 測定結果をまとめる間隔（同時受信なので各局をこの時間積分）
+  emission_by_station: {}         # 送信所ごとの電波型式（省略時は skywave_config の link.emission）。例 {硫黄島: 24K0J2D}
   per_buoy_decorr: 0.03           # 電離層誤差のうちブイごとに異なる割合（ブイ間は数十 km で、ほぼ共通）
 
 links:

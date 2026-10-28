@@ -46,7 +46,7 @@ link:                           # CHUCK /api/predict に渡す回線条件
   rx_antenna: whip              # 航空機・ブイの受信アンテナ
   noise: 155                    # 3 MHz での人工雑音 [dBW]（155 = 静穏な地域。洋上を想定）
   min_angle: 3
-  bandwidth: 5K00               # パイロット付き OFDM の占有帯域
+  emission: 3K00J2D             # 電波型式（帯域幅 3 kHz・J2D）。帯域幅は電波型式で決まる（例: 広帯域 HF 24K0J2D）
   inband_snr_db: 6              # TOA 推定に必要な帯域内 SNR
 
 rel_min: 0.8                    # この信頼度以上の周波数がある時刻だけ、その送信所を使う
