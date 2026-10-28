@@ -1,0 +1,48 @@
+# ブイ中心構成: HF は RF ブイの SDR で受信（3〜30 MHz）、母機は HF を受信しない
+# 母機の測位は UHF TOA（ブイで計測）と VHF TDOA（母機で計測）の併用。ブイは作戦海域にだけ置く
+skywave_config: skywave_japan.yaml
+
+seed: 11
+dt: 1.0
+depart_utc: [22]
+epoch: {year: 2026, month: 10, ssn: effective, ssn_fallback: 100}
+
+route:
+  start: [35.0, 140.5]
+  op_area: {bearing: 170, nm: 1000}
+  orbit: {radius_km: 20, duration_h: 4}
+
+aircraft: {speed: 150.0, turn_radius: 4000.0, init_pos_sigma: 50.0, altitude: 1500.0}
+ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
+
+buoys:
+  n: 7                            # PNT 用 G サイズ RF ブイ（5〜9 本）
+  spacing_km: 15
+  accel_psd: 1.0e-7               # 漂流速度の変化（推定器のプロセス雑音 [m²/s³]）
+  clock:                          # ブイの時計（距離換算）。OCXO 相当
+    offset0_m: 3000.0             # 投下時のオフセット（10 µs）
+    drift0_mps: 0.3               # 初期の周波数ずれ（1e-9）
+    drift_rw: 3.0e-4              # 周波数ずれのランダムウォーク [m/s/√s]
+    offset_rw: 0.05
+
+drift: {mean_current: [0.25, 0.10], wind: [8.0, 3.0], diffusivity: 5.0}
+
+hf_buoy:
+  cycle_s: 12                     # SDR が全局を時分割で一巡する周期（6 局 × 2 s）
+  per_buoy_decorr: 0.03           # 電離層誤差のうちブイごとに異なる割合（ブイ間は数十 km で、ほぼ共通）
+
+links:
+  range_km: 150                   # 母機とブイの UHF/VHF が届く範囲
+  uhf: {enabled: true, interval_s: 5, sigma_m: 30}    # 母機の UHF コマンドの到着時刻をブイで計測
+  vhf: {enabled: true, interval_s: 2, sigma_m: 60}    # ブイの VHF 送信の到着時刻差を母機で計測
+
+iono_tau_s: {model: 10800, realtime: 1800}
+sigma_h_km: {model: 20, realtime: 5}
+ground_wave_sigma_km: 0.3
+
+modes: [ins_only, model, realtime]
+
+scenarios:
+  nominal: []
+  storm:
+    - {type: storm, start_h: 3.5, duration_h: 6.0, ramp_h: 1.0, dh_km: 40, muf_factor: 0.7, sigma_factor: 2.0}

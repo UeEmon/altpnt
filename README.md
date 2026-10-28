@@ -3,6 +3,12 @@
 開発引継書（`docs/開発引継書_代替PNTシミュレータ.md`）と提案書（`docs/提案書_代替PNTシステム.md`）に基づく新規プロジェクト。
 **Phase 1（P0）**のコア基盤と、Phase 2 の数理・RFモデルの最初の版を実装済み。
 
+
+> **確定した前提（2026-10-28）**: 周波数は 3〜30 MHz。**母機は HF を受信しない**。RF ブイの SDR が複数局の HF を受信して
+> VHF で母機に送り、母機は UHF でブイにコマンドを送る。母機の測位は UHF TOA と VHF TDOA の併用。ブイは作戦海域のみ。
+> この前提のシナリオは **`altpnt-buoynet`**。構成・結果・仮定は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+> `altpnt-run` と `altpnt-longrange` は機上で HF を受信する旧前提のシナリオで、比較用に残している。
+
 ## クイックスタート
 
 ```bash
@@ -120,6 +126,18 @@ INS 単独 11.9 / 26.9 km、モデル補正 5.5 / 1.4 km、リアルタイム推
 前提と注意: 電離層の残差は送信所ごとに独立な Gauss-Markov 過程（相関時間はモデル補正 3 時間、ほかは 30 分）で、
 EKF はその統計を正しく知っている。磁気嵐・太陽フレアによる突発的な変化や、局間で相関した誤差は入れていない。
 出発直後に地表波で INS の速度バイアスを較正できることが効いている（地表波なしではモデル補正の作戦海域誤差が 5.5 → 9.2 km）。
+
+## ブイ中心構成（確定した前提）: altpnt-buoynet
+
+```bash
+CHUCK_APP_DIR=../VOCAP-COMPATIBILITY-/app VOACAP_BIN=... VOACAP_MODEL=... \
+altpnt-buoynet --runs 6 --out out/buoynet                 # UHF TOA ＋ VHF TDOA
+altpnt-buoynet --links uhf --runs 4 --out out/buoynet_uhf  # UHF だけ（vhf も可）
+altpnt-buoynet --scenario storm --runs 4 --out out/buoynet_storm
+```
+
+ブイ網の推定器（各ブイの位置・漂流速度・時計 ＋ 全ブイ共通の送信所ごとの電離層バイアス）で HF の TOA を処理し、
+母機の EKF はその推定値と共分散を使って UHF/VHF の到着時刻差を処理します。結果と仮定は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 次の作業（引継書 Phase 対応）
 

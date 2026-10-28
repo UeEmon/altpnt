@@ -23,6 +23,7 @@ dev = ["pytest>=8", "matplotlib>=3.8"]
 altpnt-run = "altpnt_sim.scenario:main"
 altpnt-skywave = "altpnt_sim.skywave:main"
 altpnt-longrange = "altpnt_sim.longrange:main"
+altpnt-buoynet = "altpnt_sim.buoynet:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
