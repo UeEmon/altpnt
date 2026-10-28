@@ -13,7 +13,7 @@
 
 ブイの引き継ぎ（relief.buoy_handover、機上推定のとき）
   estimate … 前の機体のブイを使い続け、前の機体の推定位置（と共分散）を離脱時に UHF でブイへ書き込み、
-              交代機が VHF で受け取る（handover_velocity: true なら漂流速度も）
+              交代機が VHF で受け取る（handover_velocity / handover_clock で漂流速度・時計も）
   blind    … 前の機体のブイを使い続けるが、推定位置は渡らない（計画上の中心 ± prior_km だけ）
   fresh    … ブイを引き継がない。交代機は到着時に自分のブイを投下する（位置の手がかりは自機の INS）
 """
@@ -75,9 +75,9 @@ class NetEstimator:
                 self.P[j2:j2 + 2, j:j + 2] = shared[m2]
         self.ready.add(m)
 
-    def set_prior(self, ms, x_blocks, P_joint, k_per):
-        """ms のブイの先頭 k_per 個の状態（位置、または位置と速度）を、受け取った推定値と共分散で置き換える."""
-        idx = [self.ix[m] + a for m in ms for a in range(k_per)]
+    def set_prior(self, ms, x_blocks, P_joint, offs):
+        """ms のブイの状態のうち offs（0,1=位置 2,3=速度 4,5=時計）を、受け取った推定値と共分散で置き換える."""
+        idx = [self.ix[m] + a for m in ms for a in offs]
         self.x[idx] = x_blocks
         self.P[np.ix_(idx, idx)] = P_joint
 
@@ -297,10 +297,11 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
             if handover == "estimate" and old and kk > 0 and acs[kk - 1]["net"] is not None:
                 prev = acs[kk - 1]["net"]                       # ブイに書き込まれた、前の機体の推定値
                 prev.propagate(i, tau)
-                kp = 4 if cfg["relief"].get("handover_velocity", False) else 2
+                offs = [0, 1] + ([2, 3] if cfg["relief"].get("handover_velocity", False) else []) \
+                    + ([4, 5] if cfg["relief"].get("handover_clock", False) else [])
                 ms = [m for m in old if m in prev.ready]
-                idx = [prev.ix[m] + a for m in ms for a in range(kp)]
-                ac["net"].set_prior(ms, prev.x[idx], prev.P[np.ix_(idx, idx)], kp)
+                idx = [prev.ix[m] + a for m in ms for a in offs]
+                ac["net"].set_prior(ms, prev.x[idx], prev.P[np.ix_(idx, idx)], offs)
         # ---- ブイの HF 受信と、ブイ網の推定
         if live and (i - dep[0]) % k_cyc == 0:
             if kk >= 0:
@@ -418,6 +419,7 @@ def main(argv=None):
     ap.add_argument("--handover", nargs="*", choices=["estimate", "blind", "fresh"],
                     help="ブイの引き継ぎ方（機上推定のみ。複数指定で比較）")
     ap.add_argument("--handover-velocity", action="store_true", help="estimate で漂流速度の推定値も渡す")
+    ap.add_argument("--handover-clock", action="store_true", help="estimate で時計の推定値も渡す")
     ap.add_argument("--chuck-url"); ap.add_argument("--ssn-from")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -442,6 +444,8 @@ def main(argv=None):
             c["relief"] = dict(cfg["relief"], buoy_handover=ho)
             if a.handover_velocity:
                 c["relief"]["handover_velocity"] = True
+            if a.handover_clock:
+                c["relief"]["handover_clock"] = True
             out = run(c, sky, be, cfg["depart_utc"], est, ssn_url)
             runs.append(summarize(out))
             if r == 0:

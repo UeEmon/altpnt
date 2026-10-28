@@ -81,3 +81,4 @@ relief:
   prior_km: 20                    # 推定位置が渡らないとき、交代機が持つブイ位置の手がかり（計画上の中心 ± 20 km）
   buoy_handover: estimate         # estimate: ブイを引き継ぎ、推定位置もブイ経由で渡る / blind: ブイだけ引き継ぐ / fresh: 引き継がず交代機が新規投下
   handover_velocity: false        # estimate で漂流速度の推定値も渡すか
+  handover_clock: false           # estimate で時計（オフセット・ドリフト）の推定値も渡すか
