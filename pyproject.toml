@@ -25,6 +25,7 @@ altpnt-skywave = "altpnt_sim.skywave:main"
 altpnt-longrange = "altpnt_sim.longrange:main"
 altpnt-buoynet = "altpnt_sim.buoynet:main"
 altpnt-relay = "altpnt_sim.buoyrelay:main"
+altpnt-oparea = "altpnt_sim.oparea:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
