@@ -145,24 +145,45 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
     v_ins = np.array([ins.measure(v, dt) for v in V_true])
     bc = cfg["buoys"]
     B = bc["n"]
-    drops = hex_grid(op_xy, B, bc["spacing_km"] * 1e3)
+    ck = bc["clock"]
+    life_i = int(round(bc.get("lifetime_h", 8.0) * 3600 / dt))
+    # ---- 投下の計画: 作戦海域に入ったら 1 組目。再投下が有効なら、前の組が止まる overlap_h 前に次の組を投下する
+    rd = bc.get("redeploy", {}) or {}
+    i_leave = int(np.searchsorted(t, phases["作戦海域"][1]))
+    dep_idx = [i_arr]
+    if rd.get("enabled", False):
+        step_i = life_i - int(round(rd.get("overlap_h", 0.5) * 3600 / dt))
+        if step_i <= 0:
+            raise ValueError("再投下の間隔（稼働時間 − 重なり時間）が 0 以下です。overlap_h を稼働時間より短くしてください")
+        while dep_idx[-1] + step_i < i_leave - int(round(rd.get("min_remaining_h", 0.5) * 3600 / dt)):
+            dep_idx.append(dep_idx[-1] + step_i)
+    G = len(dep_idx)
+    M = B * G                                   # ブイの総数（組 × 1 組の本数）
+    gen_of = np.repeat(np.arange(G), B)
+    t_dep = np.array([dep_idx[g] for g in gen_of])
+    t_die = t_dep + life_i
+    grid = hex_grid(op_xy, B, bc["spacing_km"] * 1e3)
+    drops = np.vstack([grid for _ in range(G)])
     dr = cfg["drift"]
     sim = DriftSimulator(OceanCurrentField(mean_current=tuple(dr["mean_current"]), wind=tuple(dr["wind"]),
                                            eddy_strength=np.array([0.0])),
                          diffusivity=dr["diffusivity"], rng=np.random.default_rng(cfg["seed"] + 6))
-    bpos = np.full((T, B, 2), np.nan)
+    bpos = np.full((T, M, 2), np.nan)
     xy = drops.copy()
     for i in range(i_arr, T):
-        bpos[i] = xy
-        xy = sim.step(xy, t[i], dt)
+        dep = t_dep <= i
+        bpos[i, dep] = xy[dep]
+        if dep.any():
+            xy[dep] = sim.step(xy[dep], t[i], dt)
     rng_clk = np.random.default_rng(cfg["seed"] + 7)
-    ck = cfg["buoys"]["clock"]
-    clk = np.zeros((T, B))
-    c, cd = rng_clk.normal(0, ck["offset0_m"], B), rng_clk.normal(0, ck["drift0_mps"], B)
+    clk = np.zeros((T, M))
+    c, cd = rng_clk.normal(0, ck["offset0_m"], M), rng_clk.normal(0, ck["drift0_mps"], M)
     for i in range(i_arr, T):
         clk[i] = c
-        cd = cd + ck["drift_rw"] * math.sqrt(dt) * rng_clk.standard_normal(B)
+        cd = cd + ck["drift_rw"] * math.sqrt(dt) * rng_clk.standard_normal(M)
         c = c + cd * dt
+    alive_m = lambda i: (t_dep <= i) & (i < t_die)          # noqa: E731
+    i_end = int(t_die.max())
 
     # 電離層残差の単位 Gauss-Markov 過程（送信所ごと。全ブイ共通）
     taus = cfg["iono_tau_s"]
@@ -176,36 +197,61 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             U[i] = u
             u = a * u + math.sqrt(1 - a * a) * drive[i]
         U_by_tau[tau] = U
-    noise_hf = np.random.default_rng(cfg["seed"] + 4).standard_normal((T, B, N))
-    noise_lk = np.random.default_rng(cfg["seed"] + 8).standard_normal((T, 2, B))
+    noise_hf = np.random.default_rng(cfg["seed"] + 4).standard_normal((T, M, N))
+    noise_lk = np.random.default_rng(cfg["seed"] + 8).standard_normal((T, 2, M))
     p0 = P_true[0] + np.random.default_rng(cfg["seed"] + 5).normal(0, cfg["aircraft"]["init_pos_sigma"], 2)
 
     hb, lkc = cfg["hf_buoy"], cfg["links"]
     k_cyc = int(round(hb["cycle_s"] / dt))
     # 同時受信なら各局を測定間隔いっぱい積分できる。時分割なら局数で割った時間だけ
     integ_s = hb["cycle_s"] if hb.get("simultaneous", True) else hb["cycle_s"] / N
-    i_end = i_arr + int(round(cfg["buoys"].get("lifetime_h", 8.0) * 3600 / dt))    # ブイの稼働時間（電池）
     vhf_bps = vhf_report_bps(N, hb["cycle_s"])
+    k_link = {k: int(round(lkc[k]["interval_s"] / dt)) for k in ("uhf", "vhf")}
     results = {}
     for mode in cfg["modes"]:
         tau = float(taus.get(mode, 1800.0))
-        a1, U = math.exp(-dt / tau), U_by_tau[tau]
+        U = U_by_tau[tau]
         # ---- 母機 EKF
         x = np.zeros(4); x[:2] = p0
         P = np.diag([cfg["aircraft"]["init_pos_sigma"] ** 2] * 2 + [cfg["ins"]["bias0_sigma"] ** 2] * 2)
         F = np.eye(4); F[0, 2] = F[1, 3] = -dt
         Qa = np.diag([(cfg["ins"]["vel_noise"] * dt) ** 2] * 2 + [cfg["ins"]["bias_rw"] ** 2 * dt] * 2)
-        # ---- ブイ網 KF（投下時に初期化）
-        nb = 6 * B + N
+        # ---- ブイ網 KF: 全ブイ（全組）の [x, y, vx, vy, 時計, 時計ドリフト] + 送信所ごとの電離層バイアス（全ブイ共通）
+        nb = 6 * M + N
         xn = Pn = None
+        net_i = -1                      # ブイ網の状態がどの時刻まで進んでいるか
         sig_e = np.zeros(N)
         seen = np.zeros(N, bool)
         est = np.empty((T, 2)); sd = np.empty(T)
         net_abs = np.full(T, np.nan); net_rel = np.full(T, np.nan); n_buoy = np.zeros(T, int)
-        stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0, "commands": 0, "stale_freq_lost": 0}
+        stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0, "commands": 0, "stale_freq_lost": 0,
+                 "deployments": G, "buoys_used": M}
         plan = CommandedPlan(links, cmdc.get("horizon_h", 1), cmdc.get("update_min", 10), cmdc.get("deploy_only", False))
         Sc = np.zeros((2, 2))          # ブイ網全体の平行移動（重心の推定誤差）の共分散
         last_fix, handed_over = -1, True
+
+        def propagate(i):
+            """ブイ網の状態を時刻 i まで進める（漂流は等速＋ランダムウォーク、時計はドリフト、電離層は Gauss-Markov）."""
+            nonlocal xn, Pn, net_i
+            d = (i - net_i) * dt
+            if d <= 0:
+                return
+            Fn = np.eye(nb)
+            Qn = np.zeros(nb)
+            for m in range(M):
+                j = 6 * m
+                Fn[j, j + 2] = Fn[j + 1, j + 3] = d
+                Fn[j + 4, j + 5] = d
+                Qn[j + 2:j + 4] = bc["accel_psd"] * d
+                Qn[j + 5] = ck["drift_rw"] ** 2 * d
+                Qn[j + 4] = ck.get("offset_rw", 0.01) ** 2 * d
+            a = math.exp(-d / tau)
+            Fn[6 * M:, 6 * M:] *= a
+            Qn[6 * M:] = sig_e**2 * (1 - a * a)
+            xn = Fn @ xn
+            Pn = Fn @ Pn @ Fn.T + np.diag(Qn)
+            net_i = i
+
         for i in range(T):
             if i:
                 x[:2] += (v_ins[i - 1] - x[2:]) * dt
@@ -213,85 +259,80 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             if mode == "ins_only":
                 est[i] = x[:2]; sd[i] = math.sqrt(P[0, 0] + P[1, 1])
                 continue
-            if i == i_arr:
-                # 投下: 母機は自分の推定位置を基準に投下点を決めるので、ブイの事前位置は母機の推定誤差を含む
-                xn = np.zeros(nb); Pn = np.zeros((nb, nb))
+            if i in dep_idx:
+                # 投下（再投下を含む）: 母機は自分の推定位置を基準に投下点を決めるので、新しいブイの事前位置には
+                # 母機の推定誤差（ブイ網に対する相対誤差＋ブイ網全体のずれ）が乗る
+                if xn is None:
+                    xn = np.zeros(nb); Pn = np.zeros((nb, nb)); net_i = i
+                else:
+                    propagate(i)
+                g = dep_idx.index(i)
                 off = x[:2] - P_true[i]
-                for b in range(B):
-                    j = 6 * b
-                    xn[j:j + 2] = drops[b] + off
-                    Pn[j:j + 2, j:j + 2] = P[:2, :2] + np.eye(2) * 500.0**2
+                P_drop = P[:2, :2] + Sc
+                slots = [m for m in range(M) if gen_of[m] == g]
+                for m in slots:
+                    j = 6 * m
+                    xn[j:j + 6] = 0.0
+                    Pn[j:j + 6, :] = 0.0; Pn[:, j:j + 6] = 0.0
+                    xn[j:j + 2] = drops[m] + off
+                    Pn[j:j + 2, j:j + 2] = P_drop + np.eye(2) * 500.0**2
                     Pn[j + 2:j + 4, j + 2:j + 4] = np.eye(2) * 0.5**2
                     Pn[j + 4, j + 4] = ck["offset0_m"] ** 2
                     Pn[j + 5, j + 5] = ck["drift0_mps"] ** 2
-                for b1 in range(B):             # 投下位置の誤差は全ブイ共通（母機の位置誤差）
-                    for b2 in range(B):
-                        if b1 != b2:
-                            Pn[6 * b1:6 * b1 + 2, 6 * b2:6 * b2 + 2] = P[:2, :2]
-            if xn is not None and i > i_arr:
-                # ブイ網の予測（漂流は等速＋ランダムウォーク、時計はオフセット＋ドリフト、電離層は Gauss-Markov）
-                Fn = np.eye(nb)
-                Qn = np.zeros(nb)
-                for b in range(B):
-                    j = 6 * b
-                    Fn[j, j + 2] = Fn[j + 1, j + 3] = dt
-                    Fn[j + 4, j + 5] = dt
-                    Qn[j + 2:j + 4] = bc["accel_psd"] * dt
-                    Qn[j + 5] = ck["drift_rw"] ** 2 * dt
-                    Qn[j + 4] = ck.get("offset_rw", 0.01) ** 2 * dt
-                Fn[6 * B:, 6 * B:] *= a1
-                Qn[6 * B:] = sig_e**2 * (1 - a1 * a1)
-                xn = Fn @ xn
-                Pn = Fn @ Pn @ Fn.T + np.diag(Qn)
-            alive = i_arr <= i < i_end
-            if xn is not None and alive and (i - i_arr) % k_cyc == 0:
-                # ---- ブイの HF 受信（時分割で全局を一巡したとみなす）
-                # ブイは UHF で指示された周波数を受信する（指示が古いと MUF の変化で受からなくなる）
-                near = bool(np.any(np.hypot(*(bpos[i] - P_true[i]).T) <= lkc["range_km"] * 1e3))
-                plan.maybe_command(t[i], int(hour_of[i]), near or i == i_arr)
+                for m1 in slots:                # 同じ組の投下位置の誤差は共通（母機の位置誤差）
+                    for m2 in slots:
+                        if m1 != m2:
+                            Pn[6 * m1:6 * m1 + 2, 6 * m2:6 * m2 + 2] = P_drop
+            al = alive_m(i)
+            live = np.flatnonzero(al)
+            if xn is not None and live.size and (i - i_arr) % k_cyc == 0:
+                propagate(i)
+                # ---- ブイの HF 受信: UHF で指示された周波数を同時受信（指示が古いと MUF の変化で受からなくなる）
+                near = bool(np.any(np.hypot(*(bpos[i, live] - P_true[i]).T) <= lkc["range_km"] * 1e3))
+                plan.maybe_command(t[i], int(hour_of[i]), near or i in dep_idx)
                 fq = plan.freqs(int(hour_of[i]))
                 lk = [link_for_freq(raw[s][int(hour_of[i])], dist_op[s], fq[s] if fq else None,
                                     sky_cfg["rel_min"], sky_cfg["ground_wave_km"]) for s in range(N)]
                 stats["stale_freq_lost"] += sum(1 for s in range(N) if links[s][hour_of[i]].usable and not lk[s].usable)
                 stats["commands"] = plan.count
-                cen = np.nanmean(bpos[i], axis=0)
+                cen = np.mean(bpos[i, live], axis=0)
                 cla, clo = aeqd_inverse(cen[0], cen[1], *origin)
                 use = [s for s in range(N) if lk[s].usable
                        and not tl.blocked(i, s, float(cla), float(clo), stations[s], lk[s].kind)]
                 for s in use:
                     sg = iono_sigma_m(lk[s], mode, cfg)
                     if not seen[s]:
-                        xn[6 * B + s] = 0.0
-                        Pn[6 * B + s, :] = 0.0; Pn[:, 6 * B + s] = 0.0
-                        Pn[6 * B + s, 6 * B + s] = sg**2
+                        xn[6 * M + s] = 0.0
+                        Pn[6 * M + s, :] = 0.0; Pn[:, 6 * M + s] = 0.0
+                        Pn[6 * M + s, 6 * M + s] = sg**2
                         seen[s] = True
                     elif abs(sg / sig_e[s] - 1) > 1e-6:
                         r = sg / sig_e[s]
-                        xn[6 * B + s] *= r
-                        Pn[6 * B + s, :] *= r; Pn[:, 6 * B + s] *= r
+                        xn[6 * M + s] *= r
+                        Pn[6 * M + s, :] *= r; Pn[:, 6 * M + s] *= r
                     sig_e[s] = sg
                 if len(use) >= 3:
                     stats["hf_cycles"] += 1
                     zs, hs, Hs, Rs = [], [], [], []
-                    for b in range(B):
-                        la_t, lo_t = aeqd_inverse(bpos[i, b, 0], bpos[i, b, 1], *origin)
-                        j = 6 * b
+                    for m in live:
+                        la_t, lo_t = aeqd_inverse(bpos[i, m, 0], bpos[i, m, 1], *origin)
+                        j = 6 * m
                         la_e, lo_e = aeqd_inverse(xn[j], xn[j + 1], *origin)
                         for s in use:
                             sg_true = iono_sigma_m(lk[s], mode, cfg) * tl.sigma_factor(i)
                             e_true = sg_true * U[i, s] + (tl.storm_bias_m(i, lk[s].dPdh, mode) if lk[s].kind == "sky" else 0.0)
                             sig_toa = math.hypot(buoy_toa_sigma_m(lk[s], bw_hz[s], integ_s), hb["per_buoy_decorr"] * sg_true)
                             zs.append(group_path_m(float(la_t), float(lo_t), stations[s], lk[s]) + e_true
-                                      + clk[i, b] + sig_toa * noise_hf[i, b, s])
+                                      + clk[i, m] + sig_toa * noise_hf[i, m, s])
                             g0 = group_path_m(float(la_e), float(lo_e), stations[s], lk[s])
                             hrow = np.zeros(nb)
                             for ax_ in range(2):
-                                d = np.zeros(2); d[ax_] = 10.0
-                                la2, lo2 = aeqd_inverse(xn[j] + d[0], xn[j + 1] + d[1], *origin)
+                                dd = np.zeros(2); dd[ax_] = 10.0
+                                la2, lo2 = aeqd_inverse(xn[j] + dd[0], xn[j + 1] + dd[1], *origin)
                                 hrow[j + ax_] = (group_path_m(float(la2), float(lo2), stations[s], lk[s]) - g0) / 10.0
                             hrow[j + 4] = 1.0
-                            hrow[6 * B + s] = 1.0
-                            hs.append(g0 + xn[j + 4] + xn[6 * B + s])
+                            hrow[6 * M + s] = 1.0
+                            hs.append(g0 + xn[j + 4] + xn[6 * M + s])
                             Hs.append(hrow); Rs.append(sig_toa**2)
                     H = np.array(Hs); R = np.diag(Rs)
                     y = np.array(zs) - np.array(hs)
@@ -300,39 +341,44 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                     xn = xn + K @ y
                     IKH = np.eye(nb) - K @ H
                     Pn = IKH @ Pn @ IKH.T + K @ R @ K.T
-            if xn is not None and alive:
-                A = np.zeros((2, nb))
-                for b in range(B):
-                    A[:, 6 * b:6 * b + 2] += np.eye(2) / B
-                Sc = A @ Pn @ A.T
-                be = np.array([xn[6 * b:6 * b + 2] for b in range(B)])
-                errs = be - bpos[i]
-                net_abs[i] = float(np.hypot(*errs.mean(axis=0)))
-                net_rel[i] = float(np.sqrt(np.mean(np.sum((errs - errs.mean(axis=0)) ** 2, axis=1))))
-                # ---- 母機: UHF TOA（ブイで計測）と VHF TDOA（母機で計測）
-                inr = [b for b in range(B) if np.hypot(*(bpos[i, b] - P_true[i])) <= lkc["range_km"] * 1e3]
+            if xn is not None and live.size:
+                # ---- 母機: UHF TOA（ブイで計測）と VHF TDOA（母機で計測）。範囲内の稼働中のブイを使う
+                inr = [int(m) for m in live if np.hypot(*(bpos[i, m] - P_true[i])) <= lkc["range_km"] * 1e3]
                 n_buoy[i] = len(inr)
-                for kind, k_int, sig in (("uhf", lkc["uhf"]["interval_s"], lkc["uhf"]["sigma_m"]),
-                                         ("vhf", lkc["vhf"]["interval_s"], lkc["vhf"]["sigma_m"])):
-                    if not lkc[kind]["enabled"] or (i - i_arr) % int(round(k_int / dt)) or len(inr) < 3:
+                due = [k for k in ("uhf", "vhf") if lkc[k]["enabled"] and (i - i_arr) % k_link[k] == 0]
+                if due and len(inr) >= 3:
+                    propagate(i)
+                if (i - i_arr) % k_cyc == 0 or due:
+                    A = np.zeros((2, nb))
+                    for m in live:
+                        A[:, 6 * m:6 * m + 2] += np.eye(2) / live.size
+                    if net_i == i:
+                        Sc = A @ Pn @ A.T
+                        be = np.array([xn[6 * m:6 * m + 2] for m in live])
+                        errs = be - bpos[i, live]
+                        net_abs[i] = float(np.hypot(*errs.mean(axis=0)))
+                        net_rel[i] = float(np.sqrt(np.mean(np.sum((errs - errs.mean(axis=0)) ** 2, axis=1))))
+                for kind in due:
+                    if len(inr) < 3:
                         continue
+                    sig = lkc[kind]["sigma_m"]
                     stats[kind] += 1
                     ch = 0 if kind == "uhf" else 1
-                    rho = np.array([slant(P_true[i], bpos[i, b], alt) + clk[i, b] + sig * noise_lk[i, ch, b] for b in inr])
-                    pred = np.array([slant(x[:2], xn[6 * b:6 * b + 2], alt) + xn[6 * b + 4] for b in inr])
-                    u = np.array([(x[:2] - xn[6 * b:6 * b + 2]) / slant(x[:2], xn[6 * b:6 * b + 2], alt) for b in inr])
+                    rho = np.array([slant(P_true[i], bpos[i, m], alt) + clk[i, m] + sig * noise_lk[i, ch, m] for m in inr])
+                    pred = np.array([slant(x[:2], xn[6 * m:6 * m + 2], alt) + xn[6 * m + 4] for m in inr])
+                    u = np.array([(x[:2] - xn[6 * m:6 * m + 2]) / slant(x[:2], xn[6 * m:6 * m + 2], alt) for m in inr])
                     y = (rho[1:] - rho[0]) - (pred[1:] - pred[0])
                     H = np.zeros((len(inr) - 1, 4)); H[:, :2] = u[1:] - u[0]
                     # ブイ網の不確かさ（位置・時計）を観測誤差に入れる
-                    G = np.zeros((len(inr) - 1, nb))
-                    for r, b in enumerate(inr):
-                        j = 6 * b
+                    Gm = np.zeros((len(inr) - 1, nb))
+                    for r, m in enumerate(inr):
+                        j = 6 * m
                         row = -u[r]
                         if r == 0:
-                            G[:, j:j + 2] -= row; G[:, j + 4] -= 1.0
+                            Gm[:, j:j + 2] -= row; Gm[:, j + 4] -= 1.0
                         else:
-                            G[r - 1, j:j + 2] += row; G[r - 1, j + 4] += 1.0
-                    R = tdoa_cov(len(inr), sig) + G @ Pn @ G.T
+                            Gm[r - 1, j:j + 2] += row; Gm[r - 1, j + 4] += 1.0
+                    R = tdoa_cov(len(inr), sig) + Gm @ Pn @ Gm.T
                     S = H @ P @ H.T + R
                     K = np.linalg.solve(S, H @ P).T
                     x = x + K @ y
@@ -341,7 +387,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             # 母機の位置はブイ網に対して決まる: 絶対位置の不確かさ = 相対の共分散 + ブイ網全体の平行移動
             fixing = last_fix >= 0 and i - last_fix <= 60
             if not fixing and not handed_over:
-                P[:2, :2] += Sc            # ブイ網を離れた: 網の絶対誤差を母機の共分散へ引き継ぐ
+                P[:2, :2] += Sc            # ブイ網を離れた（またはブイが止まった）: 網の絶対誤差を母機へ引き継ぐ
                 handed_over = True
             est[i] = x[:2]
             sd[i] = math.sqrt(max(P[0, 0] + P[1, 1] + (np.trace(Sc) if fixing else 0.0), 0.0))
@@ -356,6 +402,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             "storm": tl.storm, "flare": tl.flare,
             "links_at_op": [[(lh.freq_mhz, lh.usable) for lh in per] for per in links],
             "buoy_end_h": float(t[min(i_end, T - 1)] / 3600) if i_end < T else None,
+            "deploy_h": [round(float(t[k] / 3600), 2) for k in dep_idx],
             "emissions": dict(zip(names, emissions)), "vhf_report_bps": round(vhf_bps, 1)}
 
 
@@ -363,7 +410,8 @@ def summarize(out: dict) -> dict:
     t = out["t"]
     s = {"depart_utc": out["depart_utc"], "ssn": out["ssn"], "ssn_source": out["ssn_source"], "events": out["events"],
          "stations": out["stations"], "duration_h": round(t[-1] / 3600, 1), "emissions": out["emissions"],
-         "vhf_report_bps": out["vhf_report_bps"], "buoy_end_h": out["buoy_end_h"], "modes": {}}
+         "vhf_report_bps": out["vhf_report_bps"], "buoy_end_h": out["buoy_end_h"], "deploy_h": out["deploy_h"],
+         "modes": {}}
     for mode, r in out["results"].items():
         m = {}
         for ph, (a, b) in out["phases"].items():
@@ -448,6 +496,7 @@ def main(argv=None):
     ap.add_argument("--emission", help="全送信所の電波型式（例 3K00J2D, 24K0J2D）。config を上書き")
     ap.add_argument("--lifetime-h", type=float, help="ブイの稼働時間 [h]（既定 8）")
     ap.add_argument("--orbit-h", type=float, help="作戦海域での周回時間 [h]")
+    ap.add_argument("--redeploy", choices=["on", "off"], help="作戦海域での再投下（config を上書き）")
     ap.add_argument("--command-horizon", type=int, help="1 回の指示で送る周波数計画の時間幅 [h]")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -463,6 +512,8 @@ def main(argv=None):
         cfg["buoys"]["lifetime_h"] = a.lifetime_h
     if a.orbit_h:
         cfg["route"]["orbit"]["duration_h"] = a.orbit_h
+    if a.redeploy:
+        cfg["buoys"].setdefault("redeploy", {})["enabled"] = a.redeploy == "on"
     if a.command_once:
         cfg["command"]["deploy_only"] = True
     if a.command_horizon:

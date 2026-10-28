@@ -10,7 +10,7 @@ epoch: {year: 2026, month: 10, ssn: effective, ssn_fallback: 100}
 route:
   start: [35.0, 140.5]
   op_area: {bearing: 170, nm: 1000}
-  orbit: {radius_km: 20, duration_h: 4}
+  orbit: {radius_km: 20, duration_h: 8}   # 作戦海域での 1 機あたりの在空時間 8 時間
 
 aircraft: {speed: 150.0, turn_radius: 4000.0, init_pos_sigma: 50.0, altitude: 1500.0}
 ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
@@ -18,6 +18,10 @@ ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
 buoys:
   n: 7                            # PNT 用 G サイズ RF ブイ（5〜9 本）
   lifetime_h: 8                   # 稼働時間（電池）。投下から 8 時間で HF 受信も UHF/VHF も止まる
+  redeploy:                       # 作戦海域での再投下
+    enabled: true
+    overlap_h: 0.5                # 前の組が止まる 30 分前に次の組を投下（新旧の重なりで推定を引き継ぐ）
+    min_remaining_h: 0.5          # 作戦海域を離れるまでの残りがこれ未満なら投下しない
   spacing_km: 15
   accel_psd: 1.0e-7               # 漂流速度の変化（推定器のプロセス雑音 [m²/s³]）
   clock:                          # ブイの時計（距離換算）。OCXO 相当

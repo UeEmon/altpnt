@@ -317,7 +317,7 @@ def aggregate(runs: list[dict]) -> dict:
     if len(runs) == 1:
         return dict(runs[0], runs=1)
     base = {k: runs[0].get(k) for k in ("depart_utc", "ssn", "ssn_source", "stations", "duration_h", "events",
-                                         "emissions", "vhf_report_bps", "buoy_end_h")}
+                                         "emissions", "vhf_report_bps", "buoy_end_h", "deploy_h")}
     base["runs"] = len(runs)
     base["modes"] = {}
     for mode, m0 in runs[0]["modes"].items():

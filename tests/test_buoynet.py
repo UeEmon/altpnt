@@ -101,6 +101,7 @@ def test_wider_band_and_simultaneous_reception_reduce_toa_noise():
 def test_buoys_stop_after_lifetime():
     cfg, sky = _cfg()
     cfg["buoys"]["lifetime_h"] = 0.5
+    cfg["buoys"]["redeploy"] = {"enabled": False}
     cfg["modes"] = ["realtime"]
     out = BN.run(cfg, sky, FakeBackend(), depart_utc=22)
     t = out["t"]
@@ -108,3 +109,18 @@ def test_buoys_stop_after_lifetime():
     r = out["results"]["realtime"]
     after = (t > a + 0.5 * 3600 + 60) & (t < b)
     assert out["buoy_end_h"] is not None and (r["n_buoy"][after] == 0).all()
+
+
+def test_redeploy_keeps_network_alive():
+    cfg, sky = _cfg()
+    cfg["route"]["orbit"]["duration_h"] = 1.5
+    cfg["buoys"]["lifetime_h"] = 0.75
+    cfg["buoys"]["redeploy"] = {"enabled": True, "overlap_h": 0.25, "min_remaining_h": 0.25}
+    cfg["modes"] = ["realtime"]
+    out = BN.run(cfg, sky, FakeBackend(), depart_utc=22)
+    s = BN.summarize(out)["modes"]["realtime"]
+    assert s["counts"]["deployments"] == 3 and s["counts"]["buoys_used"] == 3 * cfg["buoys"]["n"]   # 0, 0.5, 1.0 h に投下
+    t, r = out["t"], out["results"]["realtime"]
+    a, b = out["phases"]["作戦海域"]
+    mid = (t > a + 0.8 * 3600) & (t < a + 1.2 * 3600)              # 1 組目が止まった後も 2 組目で測位が続く
+    assert (r["n_buoy"][mid] >= 3).all()
