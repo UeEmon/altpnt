@@ -51,18 +51,27 @@ def _first_hour(out, k):
     return float(np.nanmean(out["acs"][k]["err"][a0:a0 + int(1800 / out["dt"])]))
 
 
-def test_buoy_handover_modes():
+def test_relief_cases():
     cfg, sky = _cfg()
     res = {}
-    for ho in ("estimate", "blind", "fresh"):
-        c = dict(cfg, relief=dict(cfg["relief"], buoy_handover=ho))
-        res[ho] = RL.run(c, sky, FakeBackend(), 22, "aircraft")
-    # 引き継がない場合は、交代機が到着時に自分のブイを投下する（各機 1 回以上）
-    assert res["fresh"]["dep_h"][0] < res["fresh"]["dep_h"][-1]
+    for name in ("handover", "handover_full", "none", "fresh"):
+        c = dict(cfg, relief=dict(cfg["relief"], **RL.CASES[name]))
+        res[name] = RL.run(c, sky, FakeBackend(), 22, "aircraft")
+    # 引き継ぎなし・新規投下: 交代機が到着時に自分のブイを投下する
     t_arr2 = res["fresh"]["op_win"][1][0] * res["fresh"]["dt"] / 3600
     assert any(abs(d - t_arr2) < 0.01 for d in res["fresh"]["dep_h"])
-    # 推定位置を受け取った交代機は、何も知らない交代機より立ち上がりが良い
-    assert _first_hour(res["estimate"], 1) < _first_hour(res["blind"], 1)
-    # 1 機目は引き継ぎ方に関係なく同じ
-    assert np.allclose(res["estimate"]["acs"][0]["err"][:res["estimate"]["op_win"][0][1]],
-                       res["blind"]["acs"][0]["err"][:res["blind"]["op_win"][0][1]], equal_nan=True)
+    # 機体間で推定位置を受け取った交代機は、何も知らない交代機より立ち上がりが良い
+    assert _first_hour(res["handover"], 1) < _first_hour(res["none"], 1)
+    assert _first_hour(res["handover_full"], 1) < _first_hour(res["none"], 1)
+    # 1 機目は条件に関係なく同じ
+    b = res["none"]["op_win"][0][1]
+    assert np.allclose(res["handover"]["acs"][0]["err"][:b], res["none"]["acs"][0]["err"][:b], equal_nan=True)
+
+
+def test_invalid_handover_state_rejected():
+    import pytest
+    cfg, sky = _cfg()
+    cfg["relief"]["handover"] = True
+    cfg["relief"]["handover_states"] = ["altitude"]
+    with pytest.raises(ValueError):
+        RL.run(cfg, sky, FakeBackend(), 22, "aircraft")

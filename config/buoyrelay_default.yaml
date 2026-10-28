@@ -79,6 +79,6 @@ ground_wave_sigma_km: 0.3
 relief:
   aircraft: 2
   prior_km: 20                    # 推定位置が渡らないとき、交代機が持つブイ位置の手がかり（計画上の中心 ± 20 km）
-  buoy_handover: estimate         # estimate: ブイを引き継ぎ、推定位置もブイ経由で渡る / blind: ブイだけ引き継ぐ / fresh: 引き継がず交代機が新規投下
-  handover_velocity: false        # estimate で漂流速度の推定値も渡すか
-  handover_clock: false           # estimate で時計（オフセット・ドリフト）の推定値も渡すか
+  handover: false                 # 機体間の引き継ぎ（true: 前の機体の推定値を交代機へ直接渡す。ブイは中継しない）
+  handover_states: [position]     # 渡す内容: position / velocity / clock / iono
+  reuse_buoys: true               # true: 前の機体のブイを使い続ける / false: 交代機が到着時に自分のブイを投下

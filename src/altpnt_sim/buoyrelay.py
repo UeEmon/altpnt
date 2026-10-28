@@ -11,11 +11,12 @@
   buoy     … ブイ自身が推定（各ブイが自分の HF 受信から自位置・時計を推定し続け、結果を VHF で送る）。
              ブイどうしは通信しないので推定はブイごとに独立。推定がブイに残るので交代機もすぐ使える
 
-ブイの引き継ぎ（relief.buoy_handover、機上推定のとき）
-  estimate … 前の機体のブイを使い続け、前の機体の推定位置（と共分散）を離脱時に UHF でブイへ書き込み、
-              交代機が VHF で受け取る（handover_velocity / handover_clock で漂流速度・時計も）
-  blind    … 前の機体のブイを使い続けるが、推定位置は渡らない（計画上の中心 ± prior_km だけ）
-  fresh    … ブイを引き継がない。交代機は到着時に自分のブイを投下する（位置の手がかりは自機の INS）
+交代時の条件（機上推定のとき）
+  relief.handover      … 機体間の引き継ぎ。true なら前の機体のブイ網の推定値を交代機へ機体間で直接渡す
+                         （ブイは中継しない）。handover_states で渡す内容を選ぶ
+                           position（推定位置と共分散）/ velocity（漂流速度）/ clock（ブイの時計）/ iono（局ごとの電離層誤差）
+  relief.reuse_buoys   … true: 前の機体が投下したブイを交代機も使う（引き継ぎなしなら位置は計画上の中心 ± prior_km だけ）
+                         false: 交代機が到着時に自分のブイを投下する（位置の手がかりは自機の INS）
 """
 from __future__ import annotations
 
@@ -39,6 +40,13 @@ from .nav.ins import INSModel
 from .nav.tdoa import tdoa_cov
 from .skywave import resolve_ssn
 
+HANDOVER_STATES = {"position": (0, 1), "velocity": (2, 3), "clock": (4, 5), "iono": ()}
+CASES = {   # 比較用のプリセット
+    "handover": {"handover": True, "handover_states": ["position"], "reuse_buoys": True},
+    "handover_full": {"handover": True, "handover_states": ["position", "velocity", "clock", "iono"], "reuse_buoys": True},
+    "none": {"handover": False, "reuse_buoys": True},
+    "fresh": {"handover": False, "reuse_buoys": False},
+}
 DEFAULT_CFG = Path(__file__).resolve().parents[2] / "config" / "buoyrelay_default.yaml"
 
 
@@ -75,11 +83,18 @@ class NetEstimator:
                 self.P[j2:j2 + 2, j:j + 2] = shared[m2]
         self.ready.add(m)
 
-    def set_prior(self, ms, x_blocks, P_joint, offs):
-        """ms のブイの状態のうち offs（0,1=位置 2,3=速度 4,5=時計）を、受け取った推定値と共分散で置き換える."""
-        idx = [self.ix[m] + a for m in ms for a in offs]
-        self.x[idx] = x_blocks
-        self.P[np.ix_(idx, idx)] = P_joint
+    def take_over(self, prev, ms, states):
+        """前の機体の推定器 prev から、ms のブイの states の推定値と共分散（相互の相関を含む）を受け取る."""
+        offs = [a for st in states if st != "iono" for a in HANDOVER_STATES[st]]
+        src = [prev.ix[m] + a for m in ms for a in offs]
+        dst = [self.ix[m] + a for m in ms for a in offs]
+        if "iono" in states:
+            src += list(range(prev.io, prev.n)); dst += list(range(self.io, self.n))
+            self.seen[:] = prev.seen; self.sig_e[:] = prev.sig_e
+        if not dst:
+            return
+        self.x[dst] = prev.x[src]
+        self.P[np.ix_(dst, dst)] = prev.P[np.ix_(src, src)]
 
     def propagate(self, i, tau):
         d = (i - self.t_i) * self.dt
@@ -183,18 +198,21 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
     B = bc["n"]
     life_i = int(round(bc["lifetime_h"] * 3600 / dt))
     rd = bc.get("redeploy", {}) or {}
-    handover = cfg["relief"].get("buoy_handover", "blind")
-    if handover not in ("estimate", "blind", "fresh"):
-        raise ValueError(f"relief.buoy_handover が不正です: {handover}")
-    if handover == "fresh" and estimator != "aircraft":
-        raise ValueError("buoy_handover=fresh は estimator=aircraft でだけ使えます")
+    rel = cfg["relief"]
+    handover = bool(rel.get("handover", False))
+    states = list(rel.get("handover_states", ["position"]))
+    if not set(states) <= set(HANDOVER_STATES):
+        raise ValueError(f"relief.handover_states が不正です: {states}")
+    reuse = bool(rel.get("reuse_buoys", True))
+    if (handover or not reuse) and estimator != "aircraft":
+        raise ValueError("relief.handover / reuse_buoys=false は estimator=aircraft でだけ使えます")
     step = life_i - int(round(rd.get("overlap_h", 0.5) * 3600 / dt))
     if rd.get("enabled", True) and step <= 0:
         raise ValueError("再投下の間隔（稼働時間 − 重なり時間）が 0 以下です")
     min_rem = int(round(rd.get("min_remaining_h", 0.5) * 3600 / dt))
-    # 引き継ぐ（estimate / blind）: 作戦海域全体で 1 本の投下計画。前の機体が投下したブイを交代機も使う
-    # 引き継がない（fresh）: 各機が到着時に自分のブイを投下する（必要なら在場中に再投下）
-    windows = [(op_win[0][0], op_win[-1][1])] if handover != "fresh" else op_win
+    # reuse_buoys: 作戦海域全体で 1 本の投下計画。前の機体が投下したブイを交代機も使う
+    # それ以外: 各機が到着時に自分のブイを投下する（必要なら在場中に再投下）
+    windows = [(op_win[0][0], op_win[-1][1])] if reuse else op_win
     dep = []
     for a0, b0 in windows:
         dep.append(a0)
@@ -286,7 +304,7 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
             drop_err = ac["x"][:2] - traj[i - off[kk], 1:3]
             Pown = ac["P"][:2, :2] + ac["Sc"]
             new = [m for m in live if t_dep[m] == i]          # この機体がいま投下した組
-            old = [m for m in live if t_dep[m] < i] if handover != "fresh" else []
+            old = [m for m in live if t_dep[m] < i] if reuse else []
             for m in new:
                 ac["net"].init_slot(m, drops[m] + drop_err, Pown + np.eye(2) * 500.0**2, ck["offset0_m"], ck["drift0_mps"],
                                     shared={m2: Pown for m2 in new})
@@ -294,14 +312,10 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
                 age = (i - t_dep[m]) * dt
                 ac["net"].init_slot(m, np.asarray(op_xy, float), np.eye(2) * pk**2,
                                     ck["offset0_m"] + ck["drift0_mps"] * age, ck["drift0_mps"])
-            if handover == "estimate" and old and kk > 0 and acs[kk - 1]["net"] is not None:
-                prev = acs[kk - 1]["net"]                       # ブイに書き込まれた、前の機体の推定値
+            if handover and kk > 0 and acs[kk - 1]["net"] is not None:
+                prev = acs[kk - 1]["net"]                       # 前の機体から機体間で受け取る推定値
                 prev.propagate(i, tau)
-                offs = [0, 1] + ([2, 3] if cfg["relief"].get("handover_velocity", False) else []) \
-                    + ([4, 5] if cfg["relief"].get("handover_clock", False) else [])
-                ms = [m for m in old if m in prev.ready]
-                idx = [prev.ix[m] + a for m in ms for a in offs]
-                ac["net"].set_prior(ms, prev.x[idx], prev.P[np.ix_(idx, idx)], offs)
+                ac["net"].take_over(prev, [m for m in old if m in prev.ready], states)
         # ---- ブイの HF 受信と、ブイ網の推定
         if live and (i - dep[0]) % k_cyc == 0:
             if kk >= 0:
@@ -416,10 +430,10 @@ def main(argv=None):
     ap.add_argument("--out", default="out/buoyrelay")
     ap.add_argument("--estimator", nargs="*", default=["aircraft", "buoy"], choices=["aircraft", "buoy"])
     ap.add_argument("--runs", type=int, default=1)
-    ap.add_argument("--handover", nargs="*", choices=["estimate", "blind", "fresh"],
-                    help="ブイの引き継ぎ方（機上推定のみ。複数指定で比較）")
-    ap.add_argument("--handover-velocity", action="store_true", help="estimate で漂流速度の推定値も渡す")
-    ap.add_argument("--handover-clock", action="store_true", help="estimate で時計の推定値も渡す")
+    ap.add_argument("--case", nargs="*", choices=list(CASES),
+                    help="交代時の条件（機上推定のみ。複数指定で比較）: handover=機体間で推定位置を渡す / "
+                         "handover_full=位置・速度・時計・電離層を渡す / none=引き継ぎなし（ブイは使い続ける） / "
+                         "fresh=引き継ぎなし（交代機が新規投下）")
     ap.add_argument("--chuck-url"); ap.add_argument("--ssn-from")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -434,23 +448,19 @@ def main(argv=None):
     res = {}
     cases = []
     for est in a.estimator:
-        hos = (a.handover or [cfg["relief"].get("buoy_handover", "blind")]) if est == "aircraft" else ["blind"]
+        hos = (a.case or [None]) if est == "aircraft" else [None]
         cases += [(est, ho) for ho in hos]
     for est, ho in cases:
-        name = est if est == "buoy" else f"aircraft_{ho}"
+        name = est if ho is None else f"{est}_{ho}"
         runs = []
         for r in range(a.runs):
             c = dict(cfg, seed=cfg["seed"] + 1000 * r)
-            c["relief"] = dict(cfg["relief"], buoy_handover=ho)
-            if a.handover_velocity:
-                c["relief"]["handover_velocity"] = True
-            if a.handover_clock:
-                c["relief"]["handover_clock"] = True
+            c["relief"] = dict(cfg["relief"], **(CASES[ho] if ho else {}))
             out = run(c, sky, be, cfg["depart_utc"], est, ssn_url)
             runs.append(summarize(out))
             if r == 0:
                 plot(out, od / f"buoyrelay_{name}.png")
-        agg = {"estimator": est, "buoy_handover": ho if est == "aircraft" else None, "runs": len(runs), "deploy_h": runs[0]["deploy_h"], "buoys_used": runs[0]["buoys_used"],
+        agg = {"estimator": est, "case": ho, "runs": len(runs), "deploy_h": runs[0]["deploy_h"], "buoys_used": runs[0]["buoys_used"],
                "net_abs_mean_km": round(float(np.mean([x["net_abs_mean_km"] for x in runs])), 3), "aircraft": []}
         for k in range(len(runs[0]["aircraft"])):
             d = {}
