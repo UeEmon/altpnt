@@ -71,7 +71,8 @@ def monitor_paths(stations, names, sites, min_km=400.0, max_km=4000.0, rx_only=N
         if not (min_km <= d <= max_km):
             continue
         out.append(MonitorPath(a, b, d, midpoint(stations[a], stations[b]), dPdh(d), a in have and b in have))
-    for k, (nm, ll) in enumerate((rx_only or {}).items()):
+    extra = {nm: ll for nm, ll in (rx_only or {}).items() if not (nm in names and names.index(nm) in have)}
+    for k, (nm, ll) in enumerate(extra.items()):   # 送信所に併設済みの受信局は二重に数えない
         for a in range(len(stations)):
             d = gc_km(stations[a], ll)
             if min_km <= d <= max_km:
