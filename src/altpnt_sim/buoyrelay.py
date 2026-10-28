@@ -10,6 +10,12 @@
              （ブイの位置の事前情報は作戦海域の計画上の中心 ± prior_km しかない）
   buoy     … ブイ自身が推定（各ブイが自分の HF 受信から自位置・時計を推定し続け、結果を VHF で送る）。
              ブイどうしは通信しないので推定はブイごとに独立。推定がブイに残るので交代機もすぐ使える
+
+ブイの引き継ぎ（relief.buoy_handover、機上推定のとき）
+  estimate … 前の機体のブイを使い続け、前の機体の推定位置（と共分散）を離脱時に UHF でブイへ書き込み、
+              交代機が VHF で受け取る（handover_velocity: true なら漂流速度も）
+  blind    … 前の機体のブイを使い続けるが、推定位置は渡らない（計画上の中心 ± prior_km だけ）
+  fresh    … ブイを引き継がない。交代機は到着時に自分のブイを投下する（位置の手がかりは自機の INS）
 """
 from __future__ import annotations
 
@@ -68,6 +74,12 @@ class NetEstimator:
                 self.P[j:j + 2, j2:j2 + 2] = shared[m2]
                 self.P[j2:j2 + 2, j:j + 2] = shared[m2]
         self.ready.add(m)
+
+    def set_prior(self, ms, x_blocks, P_joint, k_per):
+        """ms のブイの先頭 k_per 個の状態（位置、または位置と速度）を、受け取った推定値と共分散で置き換える."""
+        idx = [self.ix[m] + a for m in ms for a in range(k_per)]
+        self.x[idx] = x_blocks
+        self.P[np.ix_(idx, idx)] = P_joint
 
     def propagate(self, i, tau):
         d = (i - self.t_i) * self.dt
@@ -171,13 +183,22 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
     B = bc["n"]
     life_i = int(round(bc["lifetime_h"] * 3600 / dt))
     rd = bc.get("redeploy", {}) or {}
-    end_op = op_win[-1][1]
-    dep = [op_win[0][0]]
-    if rd.get("enabled", True):
-        step = life_i - int(round(rd.get("overlap_h", 0.5) * 3600 / dt))
-        if step <= 0:
-            raise ValueError("再投下の間隔（稼働時間 − 重なり時間）が 0 以下です")
-        while dep[-1] + step < end_op - int(round(rd.get("min_remaining_h", 0.5) * 3600 / dt)):
+    handover = cfg["relief"].get("buoy_handover", "blind")
+    if handover not in ("estimate", "blind", "fresh"):
+        raise ValueError(f"relief.buoy_handover が不正です: {handover}")
+    if handover == "fresh" and estimator != "aircraft":
+        raise ValueError("buoy_handover=fresh は estimator=aircraft でだけ使えます")
+    step = life_i - int(round(rd.get("overlap_h", 0.5) * 3600 / dt))
+    if rd.get("enabled", True) and step <= 0:
+        raise ValueError("再投下の間隔（稼働時間 − 重なり時間）が 0 以下です")
+    min_rem = int(round(rd.get("min_remaining_h", 0.5) * 3600 / dt))
+    # 引き継ぐ（estimate / blind）: 作戦海域全体で 1 本の投下計画。前の機体が投下したブイを交代機も使う
+    # 引き継がない（fresh）: 各機が到着時に自分のブイを投下する（必要なら在場中に再投下）
+    windows = [(op_win[0][0], op_win[-1][1])] if handover != "fresh" else op_win
+    dep = []
+    for a0, b0 in windows:
+        dep.append(a0)
+        while rd.get("enabled", True) and dep[-1] + step < b0 - min_rem:
             dep.append(dep[-1] + step)
     G = len(dep); M = B * G
     gen = np.repeat(np.arange(G), B)
@@ -257,20 +278,29 @@ def run(cfg, sky_cfg, backend, depart_utc, estimator, ssn_url=None, with_extra=(
                 for m in slots:
                     ac["net"].init_slot(m, drops[m] + drop_err, Pd, ck["offset0_m"], ck["drift0_mps"],
                                         shared={m2: ac["P"][:2, :2] + ac["Sc"] for m2 in slots})
-        # 交代機の到着: 機上推定ならブイ網の推定をやり直す（事前情報は計画上の中心のみ）
+        # 交代機の到着: 機上推定ならブイ網の推定を新しく始める
         if estimator == "aircraft" and kk >= 0 and acs[kk]["net"] is None:
             ac = acs[kk]
             ac["net"] = NetEstimator(range(M), N, bc, i, dt)
             pk = cfg["relief"]["prior_km"] * 1e3
-            for m in live:
+            drop_err = ac["x"][:2] - traj[i - off[kk], 1:3]
+            Pown = ac["P"][:2, :2] + ac["Sc"]
+            new = [m for m in live if t_dep[m] == i]          # この機体がいま投下した組
+            old = [m for m in live if t_dep[m] < i] if handover != "fresh" else []
+            for m in new:
+                ac["net"].init_slot(m, drops[m] + drop_err, Pown + np.eye(2) * 500.0**2, ck["offset0_m"], ck["drift0_mps"],
+                                    shared={m2: Pown for m2 in new})
+            for m in old:
                 age = (i - t_dep[m]) * dt
-                if i in dep and t_dep[m] == i:
-                    pos, Pp = drops[m] + (ac["x"][:2] - traj[i - off[kk], 1:3]), ac["P"][:2, :2] + np.eye(2) * 500.0**2
-                else:
-                    pos, Pp = np.asarray(op_xy, float), np.eye(2) * pk**2
-                ac["net"].init_slot(m, pos, Pp, ck["offset0_m"] + ck["drift0_mps"] * age, ck["drift0_mps"])
-            for m in range(M):              # まだ投下されていない組も、投下時に初期化できるよう枠だけ持つ
-                pass
+                ac["net"].init_slot(m, np.asarray(op_xy, float), np.eye(2) * pk**2,
+                                    ck["offset0_m"] + ck["drift0_mps"] * age, ck["drift0_mps"])
+            if handover == "estimate" and old and kk > 0 and acs[kk - 1]["net"] is not None:
+                prev = acs[kk - 1]["net"]                       # ブイに書き込まれた、前の機体の推定値
+                prev.propagate(i, tau)
+                kp = 4 if cfg["relief"].get("handover_velocity", False) else 2
+                ms = [m for m in old if m in prev.ready]
+                idx = [prev.ix[m] + a for m in ms for a in range(kp)]
+                ac["net"].set_prior(ms, prev.x[idx], prev.P[np.ix_(idx, idx)], kp)
         # ---- ブイの HF 受信と、ブイ網の推定
         if live and (i - dep[0]) % k_cyc == 0:
             if kk >= 0:
@@ -385,6 +415,9 @@ def main(argv=None):
     ap.add_argument("--out", default="out/buoyrelay")
     ap.add_argument("--estimator", nargs="*", default=["aircraft", "buoy"], choices=["aircraft", "buoy"])
     ap.add_argument("--runs", type=int, default=1)
+    ap.add_argument("--handover", nargs="*", choices=["estimate", "blind", "fresh"],
+                    help="ブイの引き継ぎ方（機上推定のみ。複数指定で比較）")
+    ap.add_argument("--handover-velocity", action="store_true", help="estimate で漂流速度の推定値も渡す")
     ap.add_argument("--chuck-url"); ap.add_argument("--ssn-from")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
@@ -397,15 +430,23 @@ def main(argv=None):
     be = ChuckHttpBackend(a.chuck_url, cache_dir=cache) if a.chuck_url else ChuckEngineBackend(cache_dir=cache)
     ssn_url = a.ssn_from or a.chuck_url or sky.get("chuck_url")
     res = {}
+    cases = []
     for est in a.estimator:
+        hos = (a.handover or [cfg["relief"].get("buoy_handover", "blind")]) if est == "aircraft" else ["blind"]
+        cases += [(est, ho) for ho in hos]
+    for est, ho in cases:
+        name = est if est == "buoy" else f"aircraft_{ho}"
         runs = []
         for r in range(a.runs):
             c = dict(cfg, seed=cfg["seed"] + 1000 * r)
+            c["relief"] = dict(cfg["relief"], buoy_handover=ho)
+            if a.handover_velocity:
+                c["relief"]["handover_velocity"] = True
             out = run(c, sky, be, cfg["depart_utc"], est, ssn_url)
             runs.append(summarize(out))
             if r == 0:
-                plot(out, od / f"buoyrelay_{est}.png")
-        agg = {"estimator": est, "runs": len(runs), "deploy_h": runs[0]["deploy_h"], "buoys_used": runs[0]["buoys_used"],
+                plot(out, od / f"buoyrelay_{name}.png")
+        agg = {"estimator": est, "buoy_handover": ho if est == "aircraft" else None, "runs": len(runs), "deploy_h": runs[0]["deploy_h"], "buoys_used": runs[0]["buoys_used"],
                "net_abs_mean_km": round(float(np.mean([x["net_abs_mean_km"] for x in runs])), 3), "aircraft": []}
         for k in range(len(runs[0]["aircraft"])):
             d = {}
@@ -416,7 +457,7 @@ def main(argv=None):
                 elif vals[0] is not None:
                     d[key] = round(float(np.mean(vals)), 3)
             agg["aircraft"].append(d)
-        res[est] = agg
+        res[name] = agg
     (od / "summary.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(res, ensure_ascii=False, indent=1))
 
