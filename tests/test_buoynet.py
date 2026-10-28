@@ -124,3 +124,13 @@ def test_redeploy_keeps_network_alive():
     a, b = out["phases"]["作戦海域"]
     mid = (t > a + 0.8 * 3600) & (t < a + 1.2 * 3600)              # 1 組目が止まった後も 2 組目で測位が続く
     assert (r["n_buoy"][mid] >= 3).all()
+
+
+def test_iono_monitor_correction_shrinks_network_shift():
+    cfg, sky = _cfg()
+    cfg["modes"] = ["model"]
+    cfg["iono_monitor"].update({"enabled": True, "corr_km": 20000, "sigma_obs_m": 10})   # ほぼ完全に相関する場
+    on = BN.summarize(BN.run(cfg, sky, FakeBackend(), depart_utc=22))["modes"]["model"]
+    cfg["iono_monitor"]["apply"] = False
+    off = BN.summarize(BN.run(cfg, sky, FakeBackend(), depart_utc=22))["modes"]["model"]
+    assert on["ブイ網"]["abs_mean_km"] < off["ブイ網"]["abs_mean_km"]

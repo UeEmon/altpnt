@@ -40,6 +40,7 @@ from .nav.ins import INSModel
 from .nav.tdoa import tdoa_cov
 from .skywave import resolve_ssn
 from .spaceweather import Timeline
+from .ionomon import MonitorCorrector, midpoint, monitor_paths
 
 DEFAULT_CFG = Path(__file__).resolve().parents[2] / "config" / "buoynet_default.yaml"
 RNP_M = {"RNP-10": 18520.0, "RNP-4": 7408.0, "RNP-2": 3704.0, "RNP-1": 1852.0}
@@ -207,10 +208,25 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
     integ_s = hb["cycle_s"] if hb.get("simultaneous", True) else hb["cycle_s"] / N
     vhf_bps = vhf_report_bps(N, hb["cycle_s"])
     k_link = {k: int(round(lkc[k]["interval_s"] / dt)) for k in ("uhf", "vhf")}
+    mon_cfg = cfg.get("iono_monitor", {}) or {}
+    mon_paths = (monitor_paths(stations, names, mon_cfg.get("sites", names), mon_cfg.get("min_km", 400.0),
+                               mon_cfg.get("max_km", 4000.0),
+                               {k: tuple(v) for k, v in (mon_cfg.get("rx_only") or {}).items()})
+                 if mon_cfg.get("enabled") else [])
+    buoy_mid = [midpoint(st, op_ll) for st in stations]
     results = {}
     for mode in cfg["modes"]:
         tau = float(taus.get(mode, 1800.0))
         U = U_by_tau[tau]
+        mc = None
+        if mon_cfg.get("enabled") and mode != "ins_only":
+            ck_ = mon_cfg.get("corr_km", 1000.0)
+            mc = MonitorCorrector(buoy_mid, mon_paths, float(ck_[mode] if isinstance(ck_, dict) else ck_),
+                                  float(cfg["sigma_h_km"][mode]), tau, dt, T,
+                                  sigma_obs_m=mon_cfg.get("sigma_obs_m", 100.0), update_s=mon_cfg.get("update_s", 60.0),
+                                  latency_s=mon_cfg.get("latency_s", 60.0), seed=cfg["seed"] + 9)
+            U = np.zeros_like(U)
+            U[:, :] = mc.Z[:, :N]                         # 真値: 地理的に相関する場の、ブイ経路の中点での値
         # ---- 母機 EKF
         x = np.zeros(4); x[:2] = p0
         P = np.diag([cfg["aircraft"]["init_pos_sigma"] ** 2] * 2 + [cfg["ins"]["bias0_sigma"] ** 2] * 2)
@@ -299,8 +315,11 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 cla, clo = aeqd_inverse(cen[0], cen[1], *origin)
                 use = [s for s in range(N) if lk[s].usable
                        and not tl.blocked(i, s, float(cla), float(clo), stations[s], lk[s].kind)]
+                corr = mc.correction(i) if mc is not None and mon_cfg.get("apply", True) else None
                 for s in use:
                     sg = iono_sigma_m(lk[s], mode, cfg)
+                    if corr is not None:
+                        sg *= float(mc.resid_unit[s])          # 補正後に残る誤差
                     if not seen[s]:
                         xn[6 * M + s] = 0.0
                         Pn[6 * M + s, :] = 0.0; Pn[:, 6 * M + s] = 0.0
@@ -322,6 +341,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                             sg_true = iono_sigma_m(lk[s], mode, cfg) * tl.sigma_factor(i)
                             e_true = sg_true * U[i, s] + (tl.storm_bias_m(i, lk[s].dPdh, mode) if lk[s].kind == "sky" else 0.0)
                             sig_toa = math.hypot(buoy_toa_sigma_m(lk[s], bw_hz[s], integ_s), hb["per_buoy_decorr"] * sg_true)
+                            if corr is not None and lk[s].kind == "sky":
+                                e_true -= sg_true * float(corr[s])        # 監視網の補正値を差し引く
                             zs.append(group_path_m(float(la_t), float(lo_t), stations[s], lk[s]) + e_true
                                       + clk[i, m] + sig_toa * noise_hf[i, m, s])
                             g0 = group_path_m(float(la_e), float(lo_e), stations[s], lk[s])
@@ -403,7 +424,9 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             "links_at_op": [[(lh.freq_mhz, lh.usable) for lh in per] for per in links],
             "buoy_end_h": float(t[min(i_end, T - 1)] / 3600) if i_end < T else None,
             "deploy_h": [round(float(t[k] / 3600), 2) for k in dep_idx],
-            "emissions": dict(zip(names, emissions)), "vhf_report_bps": round(vhf_bps, 1)}
+            "emissions": dict(zip(names, emissions)), "vhf_report_bps": round(vhf_bps, 1),
+            "monitor": {"paths": len(mon_paths), "reciprocal": sum(p.reciprocal for p in mon_paths),
+                        "buoy_mid": buoy_mid} if mon_cfg.get("enabled") else None}
 
 
 def summarize(out: dict) -> dict:
