@@ -125,6 +125,17 @@ class MonitorCorrector:
         self.k_lat = int(round(self.latency_s / self.dt))
         age = self.latency_s + self.update_s / 2
         self.resid_unit = np.sqrt(np.clip(1 - math.exp(-2 * age / self.tau_s) * self.gain, 1e-6, 1.0))
+        # ブイ経路どうしの相関（局どうしの相関）. 補正なし: 場そのもの、補正あり: 補正後に残る誤差
+        Cbb = self.C[:self.nb, :self.nb]
+        self.cov_raw = Cbb.copy()
+        self.cov_res = Cbb - math.exp(-2 * age / self.tau_s) * (self.K @ Cbm.T) if self.paths else Cbb.copy()
+        self.cov_res = (self.cov_res + self.cov_res.T) / 2
+
+    def rho(self, applied: bool):
+        """局どうしの相関係数行列（推定器の電離層バイアスの事前共分散・プロセス雑音に使う）."""
+        c = self.cov_res if applied else self.cov_raw
+        d = np.sqrt(np.clip(np.diag(c), 1e-12, None))
+        return c / np.outer(d, d)
 
     def correction(self, i):
         """時刻 i にブイ網の推定で使える補正値（単位化、ブイ経路ごと）. まだ届いていなければ None."""

@@ -227,6 +227,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                                   latency_s=mon_cfg.get("latency_s", 60.0), seed=cfg["seed"] + 9)
             U = np.zeros_like(U)
             U[:, :] = mc.Z[:, :N]                         # 真値: 地理的に相関する場の、ブイ経路の中点での値
+        # 推定器が持つ局どうしの電離層誤差の相関（場のモデルなら相関あり。補正後は補正後の残差の相関）
+        rho_io = mc.rho(bool(mon_cfg.get("apply", True))) if mc is not None else np.eye(N)
         # ---- 母機 EKF
         x = np.zeros(4); x[:2] = p0
         P = np.diag([cfg["aircraft"]["init_pos_sigma"] ** 2] * 2 + [cfg["ins"]["bias0_sigma"] ** 2] * 2)
@@ -263,9 +265,9 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 Qn[j + 4] = ck.get("offset_rw", 0.01) ** 2 * d
             a = math.exp(-d / tau)
             Fn[6 * M:, 6 * M:] *= a
-            Qn[6 * M:] = sig_e**2 * (1 - a * a)
             xn = Fn @ xn
             Pn = Fn @ Pn @ Fn.T + np.diag(Qn)
+            Pn[6 * M:, 6 * M:] += np.outer(sig_e, sig_e) * rho_io * (1 - a * a)   # 局どうしの相関を含む
             net_i = i
 
         for i in range(T):
@@ -316,6 +318,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 use = [s for s in range(N) if lk[s].usable
                        and not tl.blocked(i, s, float(cla), float(clo), stations[s], lk[s].kind)]
                 corr = mc.correction(i) if mc is not None and mon_cfg.get("apply", True) else None
+                new_now = []
                 for s in use:
                     sg = iono_sigma_m(lk[s], mode, cfg)
                     if corr is not None:
@@ -324,6 +327,9 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                         xn[6 * M + s] = 0.0
                         Pn[6 * M + s, :] = 0.0; Pn[:, 6 * M + s] = 0.0
                         Pn[6 * M + s, 6 * M + s] = sg**2
+                        for s2 in new_now:          # 同じ時点で初めて使う局どうしは相関を入れる（事前分布）
+                            Pn[6 * M + s, 6 * M + s2] = Pn[6 * M + s2, 6 * M + s] = rho_io[s, s2] * sg * sig_e[s2]
+                        new_now.append(s)
                         seen[s] = True
                     elif abs(sg / sig_e[s] - 1) > 1e-6:
                         r = sg / sig_e[s]
