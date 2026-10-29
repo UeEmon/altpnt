@@ -343,6 +343,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 if len(use) >= 3:
                     stats["hf_cycles"] += 1
                     zs, hs, Hs, Rs = [], [], [], []
+                    fast_s, fast_g = [], []          # 補正値の速い成分（局ごと、全ブイ共通）を観測誤差に入れるための情報
                     for m in live:
                         la_t, lo_t = aeqd_inverse(bpos[i, m, 0], bpos[i, m, 1], *origin)
                         j = 6 * m
@@ -366,7 +367,13 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                             hrow[6 * M + s] = 1.0
                             hs.append(g0 + xn[j + 4] + xn[6 * M + s])
                             Hs.append(hrow); Rs.append(sig_toa**2)
+                            fast_s.append(s); fast_g.append(sg_true if (corr is not None and lk[s].kind == "sky") else 0.0)
                     H = np.array(Hs); R = np.diag(Rs)
+                    if corr is not None and est_model != "raw":
+                        # 補正値の速い成分は補正値の更新間隔のあいだ同じ値が続くので、その間の測定回数ぶん分散を広げる
+                        infl = max(1.0, float(mon_cfg.get("update_s", 60.0)) / hb["cycle_s"])
+                        gv = np.array(fast_g); sv = np.array(fast_s)
+                        R = R + np.outer(gv, gv) * mc.cov_fast[np.ix_(sv, sv)] * infl
                     y = np.array(zs) - np.array(hs)
                     S = H @ Pn @ H.T + R
                     K = np.linalg.solve(S, H @ Pn).T

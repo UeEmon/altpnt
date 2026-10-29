@@ -123,17 +123,25 @@ class MonitorCorrector:
         self.gain = np.diag(self.K @ Cbm.T) if self.paths else np.zeros(self.nb)   # 推定できる分散の割合
         self.k_upd = max(1, int(round(self.update_s / self.dt)))
         self.k_lat = int(round(self.latency_s / self.dt))
-        age = self.latency_s + self.update_s / 2
-        self.resid_unit = np.sqrt(np.clip(1 - math.exp(-2 * age / self.tau_s) * self.gain, 1e-6, 1.0))
-        # ブイ経路どうしの相関（局どうしの相関）. 補正なし: 場そのもの、補正あり: 補正後に残る誤差
+        age = self.latency_s + self.update_s / 2           # 補正値の平均の古さ
         Cbb = self.C[:self.nb, :self.nb]
         self.cov_raw = Cbb.copy()
-        self.cov_res = Cbb - math.exp(-2 * age / self.tau_s) * (self.K @ Cbm.T) if self.paths else Cbb.copy()
-        self.cov_res = (self.cov_res + self.cov_res.T) / 2
+        if self.paths:
+            KCK = self.K @ Cmm @ self.K.T
+            # 補正後に残る誤差を 2 つに分ける
+            #   ゆっくり変わる成分: 補正値が新鮮でも残る分（ブイ経路と監視経路の場の違い）。時間相関 τ の Gauss-Markov
+            #   速い成分: 補正値が古い分（更新までの間の場の変化）と監視の観測雑音。補正値の更新ごとに入れ替わる
+            self.cov_slow = Cbb - self.K @ Cbm.T - Cbm @ self.K.T + KCK
+            self.cov_fast = (1 - math.exp(-2 * age / self.tau_s)) * KCK + self.K @ self.Rm @ self.K.T
+        else:
+            self.cov_slow = Cbb.copy(); self.cov_fast = np.zeros_like(Cbb)
+        self.cov_slow = (self.cov_slow + self.cov_slow.T) / 2
+        self.cov_res = self.cov_slow + self.cov_fast       # 補正後に残る誤差の全体
+        self.resid_unit = np.sqrt(np.clip(np.diag(self.cov_slow), 1e-6, 1.0))   # 推定器の電離層バイアス（ゆっくり変わる成分）
 
     def rho(self, applied: bool):
         """局どうしの相関係数行列（推定器の電離層バイアスの事前共分散・プロセス雑音に使う）."""
-        c = self.cov_res if applied else self.cov_raw
+        c = self.cov_slow if applied else self.cov_raw
         d = np.sqrt(np.clip(np.diag(c), 1e-12, None))
         return c / np.outer(d, d)
 
