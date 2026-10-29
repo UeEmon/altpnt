@@ -241,7 +241,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
         sig_e = np.zeros(N)
         seen = np.zeros(N, bool)
         est = np.empty((T, 2)); sd = np.empty(T)
-        net_abs = np.full(T, np.nan); net_rel = np.full(T, np.nan); n_buoy = np.zeros(T, int)
+        net_abs = np.full(T, np.nan); net_rel = np.full(T, np.nan); net_sd = np.full(T, np.nan); n_buoy = np.zeros(T, int)
+        net_vec = np.full((T, 2), np.nan); iono_err = np.full((T, N), np.nan); iono_est = np.full((T, N), np.nan); iono_sd = np.full((T, N), np.nan)
         stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0, "commands": 0, "stale_freq_lost": 0,
                  "deployments": G, "buoys_used": M}
         plan = CommandedPlan(links, cmdc.get("horizon_h", 1), cmdc.get("update_min", 10), cmdc.get("deploy_only", False))
@@ -349,6 +350,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                             sig_toa = math.hypot(buoy_toa_sigma_m(lk[s], bw_hz[s], integ_s), hb["per_buoy_decorr"] * sg_true)
                             if corr is not None and lk[s].kind == "sky":
                                 e_true -= sg_true * float(corr[s])        # 監視網の補正値を差し引く
+                            iono_err[i, s] = e_true
                             zs.append(group_path_m(float(la_t), float(lo_t), stations[s], lk[s]) + e_true
                                       + clk[i, m] + sig_toa * noise_hf[i, m, s])
                             g0 = group_path_m(float(la_e), float(lo_e), stations[s], lk[s])
@@ -368,6 +370,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                     xn = xn + K @ y
                     IKH = np.eye(nb) - K @ H
                     Pn = IKH @ Pn @ IKH.T + K @ R @ K.T
+                    for s in use:
+                        iono_est[i, s] = xn[6 * M + s]; iono_sd[i, s] = math.sqrt(max(Pn[6 * M + s, 6 * M + s], 0.0))
             if xn is not None and live.size:
                 # ---- 母機: UHF TOA（ブイで計測）と VHF TDOA（母機で計測）。範囲内の稼働中のブイを使う
                 inr = [int(m) for m in live if np.hypot(*(bpos[i, m] - P_true[i])) <= lkc["range_km"] * 1e3]
@@ -384,6 +388,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                         be = np.array([xn[6 * m:6 * m + 2] for m in live])
                         errs = be - bpos[i, live]
                         net_abs[i] = float(np.hypot(*errs.mean(axis=0)))
+                        net_vec[i] = errs.mean(axis=0); net_sd[i] = float(np.sqrt(np.trace(Sc)))
                         net_rel[i] = float(np.sqrt(np.mean(np.sum((errs - errs.mean(axis=0)) ** 2, axis=1))))
                 for kind in due:
                     if len(inr) < 3:
@@ -419,7 +424,8 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             est[i] = x[:2]
             sd[i] = math.sqrt(max(P[0, 0] + P[1, 1] + (np.trace(Sc) if fixing else 0.0), 0.0))
         err = np.hypot(*(est - P_true).T)
-        results[mode] = {"est": est, "err": err, "sd": sd, "net_abs": net_abs, "net_rel": net_rel,
+        results[mode] = {"est": est, "err": err, "sd": sd, "net_abs": net_abs, "net_rel": net_rel, "net_sd": net_sd,
+                         "net_vec": net_vec, "iono_err": iono_err, "iono_est": iono_est, "iono_sd": iono_sd,
                          "n_buoy": n_buoy, "stats": stats}
 
     return {"t": t, "P_true": P_true, "lat": aeqd_inverse(P_true[:, 0], P_true[:, 1], *origin)[0],
