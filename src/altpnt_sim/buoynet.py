@@ -184,6 +184,17 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
         cd = cd + ck["drift_rw"] * math.sqrt(dt) * rng_clk.standard_normal(M)
         c = c + cd * dt
     alive_m = lambda i: (t_dep <= i) & (i < t_die)          # noqa: E731
+    # 母機の時計（距離換算 m）。出発時に GPS で合わせ、以後は自走（GPS 不使用）
+    ack = cfg["aircraft"].get("clock", {}) or {}
+    a_off0, a_dr0 = float(ack.get("offset0_m", 3.0)), float(ack.get("drift0_mps", 0.03))
+    a_rw, a_orw = float(ack.get("drift_rw", 1.0e-4)), float(ack.get("offset_rw", 0.01))
+    rng_ac = np.random.default_rng(cfg["seed"] + 12)
+    ca = np.zeros(T); c_, cd_ = rng_ac.normal(0, a_off0), rng_ac.normal(0, a_dr0)
+    for i in range(T):
+        ca[i] = c_
+        cd_ += a_rw * math.sqrt(dt) * rng_ac.standard_normal()
+        c_ += cd_ * dt + a_orw * math.sqrt(dt) * rng_ac.standard_normal()
+    noise_tw = np.random.default_rng(cfg["seed"] + 13).standard_normal((T, M))
     i_end = int(t_die.max())
 
     # 電離層残差の単位 Gauss-Markov 過程（送信所ごと。全ブイ共通）
@@ -244,6 +255,11 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
         sig_e = np.zeros(N)
         seen = np.zeros(N, bool)
         est = np.empty((T, 2)); sd = np.empty(T)
+        # 母機の時計の推定（TOD）: [オフセット, ドリフト]。ブイとの UHF/VHF 往復の時刻比較で更新する
+        ta = np.zeros(2); Pa = np.diag([a_off0**2, a_dr0**2])
+        Fa = np.array([[1.0, dt], [0.0, 1.0]]); Qa_c = np.diag([a_orw**2 * dt, a_rw**2 * dt])
+        tod_err = np.empty(T); tod_sd = np.empty(T); net_clk = np.full(T, np.nan); net_clk_sd = np.full(T, np.nan)
+        Sclk, last_tw, tw_handed = 0.0, -1, True      # ブイ網の時計の共通誤差の分散（位置の Sc と同じ扱い）
         net_abs = np.full(T, np.nan); net_rel = np.full(T, np.nan); net_sd = np.full(T, np.nan); n_buoy = np.zeros(T, int)
         net_vec = np.full((T, 2), np.nan); iono_err = np.full((T, N), np.nan); iono_est = np.full((T, N), np.nan); iono_sd = np.full((T, N), np.nan)
         stats = {"hf_cycles": 0, "uhf": 0, "vhf": 0, "commands": 0, "stale_freq_lost": 0,
@@ -278,8 +294,10 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             if i:
                 x[:2] += (v_ins[i - 1] - x[2:]) * dt
                 P = F @ P @ F.T + Qa
+                ta = Fa @ ta; Pa = Fa @ Pa @ Fa.T + Qa_c
             if mode == "ins_only":
                 est[i] = x[:2]; sd[i] = math.sqrt(P[0, 0] + P[1, 1])
+                tod_err[i] = ta[0] - ca[i]; tod_sd[i] = math.sqrt(Pa[0, 0])
                 continue
             if i in dep_idx:
                 # 投下（再投下を含む）: 母機は自分の推定位置を基準に投下点を決めるので、新しいブイの事前位置には
@@ -399,6 +417,11 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                         errs = be - bpos[i, live]
                         net_abs[i] = float(np.hypot(*errs.mean(axis=0)))
                         net_vec[i] = errs.mean(axis=0); net_sd[i] = float(np.sqrt(np.trace(Sc)))
+                        net_clk[i] = float(np.mean([xn[6 * m + 4] - clk[i, m] for m in live]))   # ブイ網の時計の共通誤差
+                        acl = np.zeros(nb)
+                        for m in live:
+                            acl[6 * m + 4] = 1.0 / live.size
+                        net_clk_sd[i] = math.sqrt(max(float(acl @ Pn @ acl), 0.0))
                         net_rel[i] = float(np.sqrt(np.mean(np.sum((errs - errs.mean(axis=0)) ** 2, axis=1))))
                 for kind in due:
                     if len(inr) < 3:
@@ -426,6 +449,29 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                     x = x + K @ y
                     P = (np.eye(4) - K @ H) @ P @ (np.eye(4) - K @ H).T + K @ R @ K.T
                     last_fix, handed_over = i, False
+                if "uhf" in due and "vhf" in due and inr:
+                    # UHF（母機→ブイ）と VHF（ブイ→母機）の往復: (UHF − VHF) / 2 = ブイの時計 − 母機の時計（伝搬時間は消える）
+                    s2w = math.hypot(lkc["uhf"]["sigma_m"], lkc["vhf"]["sigma_m"]) / 2
+                    z2 = np.array([clk[i, m] - ca[i] + s2w * noise_tw[i, m] for m in inr])
+                    cb = np.array([xn[6 * m + 4] for m in inr])
+                    ac_ = np.zeros(nb)
+                    for m in inr:
+                        ac_[6 * m + 4] = 1.0 / len(inr)
+                    # 母機時計の観測値 = −mean(z2 − ブイ時計の推定値)（ブイ網の時計の推定誤差を含む）
+                    # 母機の時計はブイ網の時計に対して決まる。ブイ網の時計の共通誤差は時間方向にほぼ一定なので
+                    # 観測雑音には入れず（平均で減らない）、表示と離脱時の引き継ぎで足す
+                    Sclk = float(ac_ @ Pn @ ac_)
+                    Ra = s2w**2 / len(inr)
+                    Ha = np.array([1.0, 0.0])
+                    Sa = Ha @ Pa @ Ha + Ra
+                    Ka = Pa @ Ha / Sa
+                    ta = ta + Ka * ((-float(np.mean(z2 - cb))) - ta[0])
+                    Pa = (np.eye(2) - np.outer(Ka, Ha)) @ Pa @ (np.eye(2) - np.outer(Ka, Ha)).T + np.outer(Ka, Ka) * Ra
+                    last_tw, tw_handed = i, False
+            tw_on = last_tw >= 0 and i - last_tw <= 60
+            if not tw_on and not tw_handed:
+                Pa[0, 0] += Sclk; tw_handed = True              # ブイと時刻比較できなくなった: 網の時計の誤差を引き継ぐ
+            tod_err[i] = ta[0] - ca[i]; tod_sd[i] = math.sqrt(Pa[0, 0] + (Sclk if tw_on else 0.0))
             # 母機の位置はブイ網に対して決まる: 絶対位置の不確かさ = 相対の共分散 + ブイ網全体の平行移動
             fixing = last_fix >= 0 and i - last_fix <= 60
             if not fixing and not handed_over:
@@ -436,7 +482,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
         err = np.hypot(*(est - P_true).T)
         results[mode] = {"est": est, "err": err, "sd": sd, "net_abs": net_abs, "net_rel": net_rel, "net_sd": net_sd,
                          "net_vec": net_vec, "iono_err": iono_err, "iono_est": iono_est, "iono_sd": iono_sd,
-                         "n_buoy": n_buoy, "stats": stats}
+                         "n_buoy": n_buoy, "stats": stats, "tod_err": tod_err, "tod_sd": tod_sd, "net_clk": net_clk, "net_clk_sd": net_clk_sd}
 
     return {"t": t, "P_true": P_true, "lat": aeqd_inverse(P_true[:, 0], P_true[:, 1], *origin)[0],
             "lon": aeqd_inverse(P_true[:, 0], P_true[:, 1], *origin)[1], "origin": origin, "op_ll": op_ll,
@@ -467,6 +513,12 @@ def summarize(out: dict) -> dict:
                      "max_km": round(float(e.max()), 3),
                      "consistency": round(float(np.sqrt(np.mean(e**2)) / max(np.sqrt(np.mean(sdv**2)), 1e-9)), 2),
                      **{k: f"{round(100 * float(np.mean(e * 1e3 <= v)))}%" for k, v in RNP_M.items()}}
+            if "tod_err" in r:
+                te = np.abs(r["tod_err"][sel]) / C * 1e9            # ns
+                ts = r["tod_sd"][sel] / C * 1e9
+                m[ph].update({"tod_mean_ns": round(float(te.mean()), 1), "tod_p95_ns": round(float(np.percentile(te, 95)), 1),
+                              "tod_max_ns": round(float(te.max()), 1),
+                              "tod_consistency": round(float(np.sqrt(np.mean(te**2)) / max(np.sqrt(np.mean(ts**2)), 1e-9)), 2)})
         a, b = out["phases"]["作戦海域"]
         sel = (t >= a) & (t <= b) & np.isfinite(r["net_abs"])
         if sel.any():
@@ -474,6 +526,11 @@ def summarize(out: dict) -> dict:
             last = sel & (t >= b - 1800)
             m["ブイ網"] = {"abs_mean_km": round(float(na.mean()), 3), "abs_last30min_km": round(float(np.mean(r["net_abs"][last]) / 1e3), 3),
                          "rel_mean_km": round(float(nr.mean()), 4)}
+            if "net_clk" in r:
+                nc = np.abs(r["net_clk"][sel]) / C * 1e9
+                m["ブイ網"]["clk_mean_ns"] = round(float(np.nanmean(nc)), 1)
+                m["ブイ網"]["clk_p95_ns"] = round(float(np.nanpercentile(nc, 95)), 1)
+                m["ブイ網"]["clk_sd_ns"] = round(float(np.sqrt(np.nanmean(r["net_clk_sd"][sel] ** 2))) / C * 1e9, 1)
         m["final_km"] = round(float(r["err"][-1] / 1e3), 3)
         m["counts"] = r["stats"]
         s["modes"][mode] = m

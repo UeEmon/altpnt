@@ -134,3 +134,14 @@ def test_iono_monitor_correction_shrinks_network_shift():
     cfg["iono_monitor"]["apply"] = False
     off = BN.summarize(BN.run(cfg, sky, FakeBackend(), depart_utc=22))["modes"]["model"]
     assert on["ブイ網"]["abs_mean_km"] < off["ブイ網"]["abs_mean_km"]
+
+
+def test_tod_from_two_way_with_buoys():
+    cfg, sky = _cfg()
+    cfg["modes"] = ["ins_only", "realtime"]
+    s = BN.summarize(BN.run(cfg, sky, FakeBackend(), depart_utc=22))["modes"]
+    op = "作戦海域"
+    # 時刻誤差（TOD）が両方式で計算される（ブイ網経由の時刻はブイ網の時計の共通誤差で決まる）
+    assert s["realtime"][op]["tod_mean_ns"] > 0 and s["ins_only"][op]["tod_mean_ns"] > 0
+    assert 0.2 < s["realtime"][op]["tod_consistency"] < 3.0   # 網の時計の共通誤差を引き継いだ見積もりと整合
+    assert "clk_mean_ns" in s["realtime"]["ブイ網"]

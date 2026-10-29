@@ -12,7 +12,16 @@ route:
   op_area: {bearing: 170, nm: 1000}
   orbit: {radius_km: 20, duration_h: 8}   # 作戦海域での 1 機あたりの在空時間 8 時間
 
-aircraft: {speed: 150.0, turn_radius: 4000.0, init_pos_sigma: 50.0, altitude: 1500.0}
+aircraft:
+  speed: 150.0
+  turn_radius: 4000.0
+  init_pos_sigma: 50.0
+  altitude: 1500.0
+  clock:                          # 母機の時計（距離換算）。出発時に GPS で合わせ、以後は自走。恒温槽付き水晶発振器相当
+    offset0_m: 3.0                # 出発時のずれ（10 ns）
+    drift0_mps: 0.03              # 周波数のずれ（1e-10）
+    drift_rw: 1.0e-4              # 周波数のずれのランダムウォーク [m/s/√s]
+    offset_rw: 0.01
 ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
 
 buoys:
