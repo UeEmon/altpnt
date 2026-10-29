@@ -228,7 +228,10 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
             U = np.zeros_like(U)
             U[:, :] = mc.Z[:, :N]                         # 真値: 地理的に相関する場の、ブイ経路の中点での値
         # 推定器が持つ局どうしの電離層誤差の相関（場のモデルなら相関あり。補正後は補正後の残差の相関）
-        rho_io = mc.rho(bool(mon_cfg.get("apply", True))) if mc is not None else np.eye(N)
+        est_model = mon_cfg.get("est_model", "res")      # 推定器が想定する補正後の誤差: res / raw（補正を知らない）/ res_diag
+        rho_io = (mc.rho(bool(mon_cfg.get("apply", True)) and est_model != "raw") if mc is not None else np.eye(N))
+        if mc is not None and est_model == "res_diag":
+            rho_io = np.eye(N)
         # ---- 母機 EKF
         x = np.zeros(4); x[:2] = p0
         P = np.diag([cfg["aircraft"]["init_pos_sigma"] ** 2] * 2 + [cfg["ins"]["bias0_sigma"] ** 2] * 2)
@@ -322,7 +325,7 @@ def run(cfg: dict, sky_cfg: dict, backend, depart_utc: float, with_extra=(), ssn
                 new_now = []
                 for s in use:
                     sg = iono_sigma_m(lk[s], mode, cfg)
-                    if corr is not None:
+                    if corr is not None and est_model != "raw":
                         sg *= float(mc.resid_unit[s])          # 補正後に残る誤差
                     if not seen[s]:
                         xn[6 * M + s] = 0.0
