@@ -23,8 +23,35 @@ from pathlib import Path
 from .voacap import parse_voacap
 
 
+_UNITS = {"H": 1.0, "K": 1e3, "M": 1e6, "G": 1e9}
+
+
+def parse_emission(designator: str) -> tuple[str, str, float]:
+    """電波型式の表記（例 3K00J2D、24K0J2D）→ (帯域幅の表記 3K00, 型式 J2D, 帯域幅 Hz).
+
+    先頭 4 文字が必要周波数帯幅（単位の文字が小数点の位置）、続く 3 文字が電波の型式（無線通信規則 付録 1）。
+    """
+    d = designator.strip().upper()
+    bw = d[:4]
+    unit = next((c for c in bw if c in _UNITS), None)
+    if len(d) < 7 or unit is None or not bw.replace(unit, "").isdigit():
+        raise ValueError(f"電波型式の表記が不正です: {designator}（例 3K00J2D）")
+    hz = float(bw.replace(unit, ".")) * _UNITS[unit]
+    return bw, d[4:7], hz
+
+
+def link_bandwidth_hz(link: dict, default: float = 5000.0) -> float:
+    if "emission" in link:
+        return parse_emission(link["emission"])[2]
+    if "bandwidth" in link:
+        bw = link["bandwidth"].upper()
+        unit = next(c for c in bw if c in _UNITS)
+        return float(bw.replace(unit, ".")) * _UNITS[unit]
+    return default
+
+
 def chuck_request(tx: tuple[float, float], rx: tuple[float, float], year: int, month: int, ssn: float,
-                  freqs: list[float], link: dict) -> dict:
+                  freqs: list[float], link: dict, emission: str | None = None) -> dict:
     """CHUCK /api/predict の入力辞書を作る. link は config の link 節（電力・アンテナ・雑音・要求 SNR など）."""
     req = {
         "tx_lat": tx[0], "tx_lon": tx[1], "rx_lat": rx[0], "rx_lon": rx[1],
@@ -38,7 +65,11 @@ def chuck_request(tx: tuple[float, float], rx: tuple[float, float], year: int, m
         req["tx_" + k] = v
     for k, v in link.get("rx_params", {}).items():
         req["rx_" + k] = v
-    if "bandwidth" in link:
+    emission = emission or link.get("emission")
+    if emission:                # 電波型式から帯域幅と型式を決め、CHUCK で要求 SNR を帯域換算する
+        bw, cls, _ = parse_emission(emission)
+        req.update(modulation=cls, snr_input="bandwidth", bandwidth=bw, inband_snr_db=link.get("inband_snr_db", 6))
+    elif "bandwidth" in link:
         req.update(snr_input="bandwidth", bandwidth=link["bandwidth"], inband_snr_db=link.get("inband_snr_db", 6))
     else:
         req["required_snr"] = link.get("required_snr", 43)

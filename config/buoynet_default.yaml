@@ -1,0 +1,73 @@
+# ブイ中心構成: HF は RF ブイの SDR で受信（3〜30 MHz）、母機は HF を受信しない
+# 母機の測位は UHF TOA（ブイで計測）と VHF TDOA（母機で計測）の併用。ブイは作戦海域にだけ置く
+skywave_config: skywave_japan.yaml
+
+seed: 11
+dt: 1.0
+depart_utc: [22]
+epoch: {year: 2026, month: 10, ssn: effective, ssn_fallback: 100}
+
+route:
+  start: [35.0, 140.5]
+  op_area: {bearing: 170, nm: 1000}
+  orbit: {radius_km: 20, duration_h: 8}   # 作戦海域での 1 機あたりの在空時間 8 時間
+
+aircraft: {speed: 150.0, turn_radius: 4000.0, init_pos_sigma: 50.0, altitude: 1500.0}
+ins: {bias0_sigma: 0.35, bias_rw: 0.002, vel_noise: 0.05}
+
+buoys:
+  n: 7                            # PNT 用 G サイズ RF ブイ（5〜9 本）
+  lifetime_h: 8                   # 稼働時間（電池）。投下から 8 時間で HF 受信も UHF/VHF も止まる
+  redeploy:                       # 作戦海域での再投下
+    enabled: true
+    overlap_h: 0.5                # 前の組が止まる 30 分前に次の組を投下（新旧の重なりで推定を引き継ぐ）
+    min_remaining_h: 0.5          # 作戦海域を離れるまでの残りがこれ未満なら投下しない
+  spacing_km: 15
+  accel_psd: 1.0e-7               # 漂流速度の変化（推定器のプロセス雑音 [m²/s³]）
+  clock:                          # ブイの時計（距離換算）。OCXO 相当
+    offset0_m: 3000.0             # 投下時のオフセット（10 µs）
+    drift0_mps: 0.3               # 初期の周波数ずれ（1e-9）
+    drift_rw: 3.0e-4              # 周波数ずれのランダムウォーク [m/s/√s]
+    offset_rw: 0.05
+
+drift: {mean_current: [0.25, 0.10], wind: [8.0, 3.0], diffusivity: 5.0}
+
+command:                          # 母機 → ブイの UHF コマンドで受信周波数（送信所ごと）を指示する
+  horizon_h: 1                    # 1 回のコマンドで送る計画の時間幅（時刻ごとの周波数）
+  update_min: 10                  # 母機が UHF 範囲にいる間、指示し直す間隔
+  deploy_only: false              # true: 投下時の 1 回だけ指示（母機が戻らない場合）
+
+hf_buoy:
+  simultaneous: true              # SDR は UHF で指示された複数の周波数を同時に受信する
+  cycle_s: 10                     # 測定結果をまとめる間隔（同時受信なので各局をこの時間積分）
+  emission_by_station: {}         # 送信所ごとの電波型式（省略時は skywave_config の link.emission）。例 {硫黄島: 24K0J2D}
+  per_buoy_decorr: 0.03           # 電離層誤差のうちブイごとに異なる割合（ブイ間は数十 km で、ほぼ共通）
+
+links:
+  range_km: 150                   # 母機とブイの UHF/VHF が届く範囲
+  uhf: {enabled: true, interval_s: 5, sigma_m: 30}    # 母機の UHF コマンドの到着時刻をブイで計測
+  vhf: {enabled: true, interval_s: 2, sigma_m: 60}    # ブイの VHF 送信の到着時刻差を母機で計測
+
+iono_tau_s: {model: 10800, realtime: 1800}
+sigma_h_km: {model: 20, realtime: 5}
+ground_wave_sigma_km: 0.3
+
+iono_monitor:                     # 電離層の監視網（送信所の近くの受信局で他局の電波を受け、補正値を作る）
+  enabled: false
+  apply: true                     # false: 電離層の場（真値）は同じで補正だけ使わない（比較用）
+  # 2026-10-29 の前提: 送信所は増やさない。受信局は各送信所の近く ＋ 硫黄島 ＋ 南鳥島
+  sites: [青森, 千葉, 広島, 鹿児島, 沖縄, 硫黄島]   # 受信局を併設する送信所（両端にあれば相互観測）。一覧にない局は無視
+  rx_only: {硫黄島: [24.78, 141.32], 南鳥島: [24.29, 153.98]}   # 受信だけの局 {名前: [lat, lon]}
+  min_km: 400                     # これより短い経路は使わない（ほぼ真上への反射で、遠距離の経路と性質が違う）
+  max_km: 4000
+  corr_km: {model: 1500, realtime: 500}    # 反射高さのずれの空間相関距離（仮定。要検証）
+  sigma_obs_m: 100                # 受信局での群路長の測定誤差（片方向）
+  update_s: 60                    # 補正値の更新間隔
+  latency_s: 60                   # 補正値が届いてブイ網の推定に使えるまでの遅延
+
+modes: [ins_only, model, realtime]
+
+scenarios:
+  nominal: []
+  storm:
+    - {type: storm, start_h: 3.5, duration_h: 6.0, ramp_h: 1.0, dh_km: 40, muf_factor: 0.7, sigma_factor: 2.0}

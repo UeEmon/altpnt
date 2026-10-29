@@ -1,0 +1,84 @@
+# 交代機シナリオ: 航空機間のデータ引き継ぎなし（ブイと航空機の間だけでやり取り）
+# altpnt-relay --estimator aircraft buoy --runs 4
+skywave_config: skywave_japan.yaml
+seed: 11
+dt: 1.0
+depart_utc: 22
+epoch:
+  year: 2026
+  month: 10
+  ssn: effective
+  ssn_fallback: 100
+route:
+  start:
+  - 35.0
+  - 140.5
+  op_area:
+    bearing: 170
+    nm: 1000
+  orbit:
+    radius_km: 20
+    duration_h: 8
+aircraft:
+  speed: 150.0
+  turn_radius: 4000.0
+  init_pos_sigma: 50.0
+  altitude: 1500.0
+ins:
+  bias0_sigma: 0.35
+  bias_rw: 0.002
+  vel_noise: 0.05
+buoys:
+  n: 7
+  lifetime_h: 8
+  redeploy:
+    enabled: true
+    overlap_h: 0.5
+    min_remaining_h: 0.5
+  spacing_km: 15
+  accel_psd: 1.0e-07
+  clock:
+    offset0_m: 3000.0
+    drift0_mps: 0.3
+    drift_rw: 0.0003
+    offset_rw: 0.05
+drift:
+  mean_current:
+  - 0.25
+  - 0.1
+  wind:
+  - 8.0
+  - 3.0
+  diffusivity: 5.0
+command:
+  horizon_h: 1
+  update_min: 10
+  deploy_only: false
+hf_buoy:
+  simultaneous: true
+  cycle_s: 10
+  emission_by_station: {}
+  per_buoy_decorr: 0.03
+links:
+  range_km: 150
+  uhf:
+    enabled: true
+    interval_s: 5
+    sigma_m: 30
+  vhf:
+    enabled: true
+    interval_s: 2
+    sigma_m: 60
+iono_tau_s:
+  model: 10800
+  realtime: 1800
+sigma_h_km:
+  model: 20
+  realtime: 5
+ground_wave_sigma_km: 0.3
+relief:
+  aircraft: 2
+  prior_km: 20                    # 推定位置が渡らないとき、交代機が持つブイ位置の手がかり（計画上の中心 ± 20 km）
+  handover: false                 # 機体間の引き継ぎ（true: 前の機体の推定値を交代機へ直接渡す。ブイは中継しない）
+  handover_states: [position]     # 渡す内容: position / velocity / clock / iono
+  reuse_buoys: true               # true: 前の機体のブイを使い続ける / false: 交代機が到着時に自分のブイを投下

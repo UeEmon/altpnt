@@ -81,24 +81,44 @@ def choose_row(rows: list[dict], rel_min: float) -> dict | None:
     return max(ok, key=lambda r: ((r.get("rel") or 0) - 0.2 * (r.get("mprob") or 0), r.get("snr_dbhz") or -999))
 
 
-def plan_link(hours: list[dict], dist_km: float, rel_min: float = 0.8, ground_wave_km: float = 300.0) -> list[LinkHour]:
+def plan_link(hours: list[dict], dist_km: float, rel_min: float = 0.8, ground_wave_km: float = 300.0,
+              muf_factor: float = 1.0) -> list[LinkHour]:
+    """muf_factor < 1 は電離層嵐で MUF が下がった状態: MUF×muf_factor を超える周波数は使わない."""
     out = []
     for b in hours:
         if dist_km <= ground_wave_km:
             out.append(LinkHour(b["hour_utc"], True, "ground", None, None, None, None, None, None, b["muf_mhz"],
                                 dist_km, 1.0, 0.0))
             continue
-        r = choose_row(b["rows"], rel_min)
+        rows = b["rows"] if muf_factor >= 1 else [r for r in b["rows"] if r["freq_mhz"] <= muf_factor * b["muf_mhz"]]
+        r = choose_row(rows, rel_min)
         if r is None:
             out.append(LinkHour(b["hour_utc"], False, "none", None, None, None, None, None, None, b["muf_mhz"],
                                 dist_km, 1.0, 0.0))
             continue
-        h, n = r["vhite_km"], hops_of(r.get("mode"))
-        dPdD = (group_path_km(dist_km + 1, h, n) - group_path_km(dist_km - 1, h, n)) / 2
-        dPdh = (group_path_km(dist_km, h + 1, n) - group_path_km(dist_km, h - 1, n)) / 2
-        out.append(LinkHour(b["hour_utc"], True, "sky", r["freq_mhz"], r["rel"], r.get("snr_dbhz"), r.get("mode"),
-                            h, r.get("mprob") or 0.0, b["muf_mhz"], dist_km, dPdD, dPdh))
+        out.append(_sky_link(b, r, dist_km))
     return out
+
+
+def _sky_link(b: dict, r: dict, dist_km: float) -> LinkHour:
+    h, n = r["vhite_km"], hops_of(r.get("mode"))
+    dPdD = (group_path_km(dist_km + 1, h, n) - group_path_km(dist_km - 1, h, n)) / 2
+    dPdh = (group_path_km(dist_km, h + 1, n) - group_path_km(dist_km, h - 1, n)) / 2
+    return LinkHour(b["hour_utc"], True, "sky", r["freq_mhz"], r["rel"], r.get("snr_dbhz"), r.get("mode"),
+                    h, r.get("mprob") or 0.0, b["muf_mhz"], dist_km, dPdD, dPdh)
+
+
+def link_for_freq(block: dict, dist_km: float, freq_mhz: float | None, rel_min: float = 0.8,
+                  ground_wave_km: float = 300.0) -> LinkHour:
+    """指定された周波数（UHF コマンドでブイに指示された周波数）で、その時刻に受信できるか."""
+    if dist_km <= ground_wave_km:
+        return LinkHour(block["hour_utc"], True, "ground", None, None, None, None, None, None, block["muf_mhz"],
+                        dist_km, 1.0, 0.0)
+    r = next((r for r in block["rows"] if freq_mhz is not None and abs(r["freq_mhz"] - freq_mhz) < 1e-6), None)
+    if r is None or (r.get("rel") or 0) < rel_min or not r.get("vhite_km"):
+        return LinkHour(block["hour_utc"], False, "none", freq_mhz, r.get("rel") if r else None, None, None, None, None,
+                        block["muf_mhz"], dist_km, 1.0, 0.0)
+    return _sky_link(block, r, dist_km)
 
 
 def range_sigma_km(lh: LinkHour, tier: str, bandwidth_hz: float = 5000.0, integ_s: float = 1.0,
